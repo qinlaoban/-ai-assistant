@@ -8,6 +8,9 @@ export function useColorScheme() {
   const [hasHydrated, setHasHydrated] = useState(false);
 
   useEffect(() => {
+    // 这里是有意的「挂载后修正」：首帧必须与服务端静态渲染一致（light），
+    // 水合完成后再切到真实配色，否则会报水合不一致
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setHasHydrated(true);
   }, []);
 

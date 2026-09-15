@@ -2,7 +2,7 @@ import { Image } from 'expo-image';
 import * as SplashScreen from 'expo-splash-screen';
 import { useState } from 'react';
 import { Dimensions, StyleSheet, View } from 'react-native';
-import Animated, { Easing, Keyframe } from 'react-native-reanimated';
+import Animated, { Easing, Keyframe, useReducedMotion } from 'react-native-reanimated';
 import { scheduleOnRN } from 'react-native-worklets';
 
 const INITIAL_SCALE_FACTOR = Dimensions.get('screen').height / 90;
@@ -96,9 +96,14 @@ const glowKeyframe = new Keyframe({
 });
 
 export function AnimatedIcon() {
+  // 引导页上的光晕会持续旋转很久；尊重系统的「减少动态效果」设置，避免无谓的常驻动画
+  const reduceMotion = useReducedMotion();
+
   return (
     <View style={styles.iconContainer}>
-      <Animated.View entering={glowKeyframe.duration(60 * 1000 * 4)} style={styles.glow}>
+      <Animated.View
+        entering={glowKeyframe.duration(reduceMotion ? 0 : 60 * 1000 * 4)}
+        style={styles.glow}>
         <Image style={styles.glow} source={require('@/assets/images/logo-glow.png')} />
       </Animated.View>
 
@@ -133,14 +138,14 @@ const styles = StyleSheet.create({
   },
   background: {
     borderRadius: 40,
-    experimental_backgroundImage: `linear-gradient(180deg, #3C9FFE, #0274DF)`,
+    experimental_backgroundImage: `linear-gradient(180deg, #2DD4BF, #0F766E)`,
     width: 128,
     height: 128,
     position: 'absolute',
   },
   splashOverlay: {
     ...StyleSheet.absoluteFill,
-    backgroundColor: '#208AEF',
+    backgroundColor: '#0F766E',
     alignItems: 'center',
     justifyContent: 'center',
     zIndex: 1000,

@@ -1,6 +1,11 @@
+/* 设计规范指定的引入方式（见 design-system/ai-assistant/MASTER.md）。
+   CSS 要求 @import 必须排在任何规则之前，所以它只能是文件的第一条。
+   原生端不加载本文件，字体由 src/constants/fonts.ts 在运行时加载。 */
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap');
+
 :root {
   --font-display:
-    Spline Sans, Inter, ui-sans-serif, system-ui, sans-serif, Apple Color Emoji, Segoe UI Emoji,
+    Plus Jakarta Sans, Spline Sans, Inter, ui-sans-serif, system-ui, sans-serif, Apple Color Emoji, Segoe UI Emoji,
     Segoe UI Symbol, Noto Color Emoji;
   --font-mono:
     ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace;

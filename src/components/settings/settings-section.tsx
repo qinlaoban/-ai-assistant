@@ -1,0 +1,80 @@
+import type { ReactNode } from 'react';
+import { StyleSheet, View, type StyleProp, type ViewStyle } from 'react-native';
+
+import { ThemedText } from '@/components/themed-text';
+import { BorderRadius, Spacing } from '@/constants/theme';
+import { useTheme } from '@/hooks/use-theme';
+
+/**
+ * 设置页的分区原语。
+ *
+ * 分区标题刻意比对话页的 `subtitle`（32px）小一号：对话页只有两三个分区，
+ * 大字号撑得住；设置页分区多，全用大字号会把层级压平、页面显得很吵。
+ */
+export function SettingsSection({
+  title,
+  caption,
+  children,
+}: {
+  title: string;
+  caption?: string;
+  children: ReactNode;
+}) {
+  return (
+    <View style={styles.section}>
+      <ThemedText themeColor="textSecondary" style={styles.title}>
+        {title}
+      </ThemedText>
+      {caption ? (
+        <ThemedText type="small" themeColor="textTertiary" style={styles.caption}>
+          {caption}
+        </ThemedText>
+      ) : null}
+      <View style={styles.body}>{children}</View>
+    </View>
+  );
+}
+
+/** 统一的圆角卡片容器：设置页里除了 chips 以外的内容都装在这里面 */
+export function SettingsCard({
+  children,
+  style,
+}: {
+  children: ReactNode;
+  style?: StyleProp<ViewStyle>;
+}) {
+  const theme = useTheme();
+  return (
+    <View
+      style={[
+        styles.card,
+        { backgroundColor: theme.backgroundElement, borderColor: theme.border },
+        style,
+      ]}>
+      {children}
+    </View>
+  );
+}
+
+/** 弱化的补充说明，用于「仅保存在本机」这类注解 */
+export function SettingsNote({ children }: { children: ReactNode }) {
+  return (
+    <ThemedText type="small" themeColor="textTertiary" style={styles.note}>
+      {children}
+    </ThemedText>
+  );
+}
+
+const styles = StyleSheet.create({
+  section: { gap: Spacing.one },
+  title: { fontSize: 13, fontWeight: '700', letterSpacing: 0.4 },
+  caption: { fontSize: 12 },
+  body: { gap: Spacing.two, marginTop: Spacing.one },
+  card: {
+    borderRadius: BorderRadius.medium,
+    borderWidth: StyleSheet.hairlineWidth,
+    padding: Spacing.three,
+    gap: Spacing.two,
+  },
+  note: { fontSize: 12, lineHeight: 18 },
+});
