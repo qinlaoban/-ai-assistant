@@ -22,10 +22,17 @@ const FADE_OUT_MS = 200;
  */
 export function Toast({
   message,
+  seq = 0,
   bottom,
   onHidden,
 }: {
   message: string | null;
+  /**
+   * 同一条文案再次出现时的递增序号。
+   * 少了它，连点两次「复制」时 message 没变 → 不重渲染 → effect 不重跑 →
+   * 第二条提示完全不出现。
+   */
+  seq?: number;
   /** 悬浮在输入区上方的高度 */
   bottom: number;
   /** 动画播完的通知。父级必须用 useCallback 固定它，否则每次渲染都会把动画重启 */
@@ -56,7 +63,7 @@ export function Toast({
       if (finished) onHidden();
     });
     return () => animation.stop();
-  }, [message, opacity, reduceMotion, onHidden]);
+  }, [message, seq, opacity, reduceMotion, onHidden]);
 
   if (!message) return null;
 

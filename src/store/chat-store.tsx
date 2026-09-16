@@ -26,12 +26,14 @@ import {
   type MessageAttachment,
   type Usage,
 } from '@/services/ai-service';
-import { attachDataUrls } from '@/services/attachments';
+import { attachDataUrls, clearAttachmentCache } from '@/services/attachments';
 import {
   finalizeAssistantMessage,
+  isSameUsage,
   makeQuote,
   rollbackAssistantSeed,
   seedVersionsFor,
+  shouldPersist,
   switchMessageVersion,
   type AssistantSeed,
 } from '@/services/chat-messages';
@@ -97,8 +99,8 @@ interface ChatContextValue {
   continueGeneration: () => Promise<void>;
   /** 切换第 index 条助手消息的历史版本（-1 上一个 / +1 下一个） */
   switchVersion: (messageIndex: number, delta: -1 | 1) => Promise<void>;
-  /** 引用第 index 条消息的正文到输入区（下一次发送生效） */
-  quoteMessage: (messageIndex: number) => void;
+  /** 引用第 index 条消息的正文到输入区（下一次发送生效）；内容为空时返回 false */
+  quoteMessage: (messageIndex: number) => boolean;
   /** 取消当前引用 */
   clearQuote: () => void;
   /** 用新内容替换第 index 条用户消息并重发 */
@@ -171,6 +173,8 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   const sessionUsageRef = useRef<Usage>(ZERO_USAGE);
   /** 朗读状态要在 TTS 回调里读到最新值（回调不在 React 渲染里，闭包捕获的 state 会过期） */
   const speakingIndexRef = useRef<number | null>(null);
+  /** 本轮请求收到的最后一份用量：部分网关会重复回传同一份，需要去重 */
+  const lastUsageRef = useRef<Usage | null>(null);
 
   const commitMessages = useCallback((next: ChatMessage[]) => {
     messagesRef.current = next;
@@ -254,7 +258,9 @@ export function ChatProvider({ children }: { children: ReactNode }) {
 
   const persist = useCallback(async (updatedAt: number = Date.now()) => {
     const id = chatIdRef.current;
-    if (!id || messagesRef.current.length === 0) return;
+    // 消息被删空也要写一次：否则磁盘仍是旧内容，刷新列表 / 重启会把已删消息读回来，
+    // 等于用户的删除被静默撤销（空消息会话由 listChats 过滤，不会出现在列表里）
+    if (!shouldPersist(id)) return;
     await saveChat({
       id,
       title: metaRef.current.title,
@@ -303,11 +309,12 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       }
       pendingRef.current = '';
       streamBaseRef.current = '';
-      // 引用与朗读都属于「当前这条会话」，切走后不该残留
+      // 引用、朗读与图片的 base64 缓存都属于「当前这条会话」，切走后不该残留
       setQuotedText(null);
       speakingIndexRef.current = null;
       setSpeakingIndex(null);
       void haltSpeech();
+      clearAttachmentCache();
       chatIdRef.current = nextId;
       metaRef.current = meta;
       setChatId(nextId);
@@ -382,6 +389,8 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       const extend = seed?.mode === 'extend';
       streamBaseRef.current = extend ? (seed?.appendBase ?? '') : '';
       pendingRef.current = '';
+      // 每轮请求重置用量去重基准，避免跨轮误判
+      lastUsageRef.current = null;
       commitMessages(
         extend
           ? [...history]
@@ -422,6 +431,9 @@ export function ChatProvider({ children }: { children: ReactNode }) {
             },
             onUsage: (next) => {
               setUsage(next);
+              // 部分网关会把同一份 usage 重复回传，照单累加会让用量成倍放大
+              if (isSameUsage(lastUsageRef.current, next)) return;
+              lastUsageRef.current = next;
               const total = addUsage(sessionUsageRef.current, next);
               sessionUsageRef.current = total;
               setSessionUsage(total);
@@ -592,12 +604,15 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     [commitMessages, persist]
   );
 
-  const quoteMessage = useCallback((messageIndex: number) => {
+  /** 返回是否真的引用成功：调用方据此决定要不要给用户「已引用」的反馈 */
+  const quoteMessage = useCallback((messageIndex: number): boolean => {
     const message = messagesRef.current[messageIndex];
-    if (!message) return;
+    if (!message) return false;
     const quote = makeQuote(message.content);
-    if (quote.length === 0) return;
+    // 空消息 / 纯空白没有可引用的内容
+    if (quote.length === 0) return false;
     setQuotedText(quote);
+    return true;
   }, []);
 
   const clearQuote = useCallback(() => setQuotedText(null), []);
@@ -610,13 +625,14 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       const target = all[messageIndex];
       if (target?.role !== 'user') return;
       // 沿用原消息的 id：列表 key 不变，这次编辑不会让整段气泡重挂载；
-      // 时间戳与引用也一并保留，编辑正文不该改变这条消息的「身份」
+      // 时间戳、引用与附件也一并保留 —— 编辑的是正文，不该顺手把图片弄丢
       await resendFrom(messageIndex, {
         role: 'user',
         content,
         id: target.id ?? createMessageId(),
         createdAt: target.createdAt ?? Date.now(),
         quote: target.quote,
+        attachments: target.attachments,
       });
     },
     [resendFrom]
@@ -629,6 +645,10 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       const all = messagesRef.current;
       if (messageIndex < 0 || messageIndex >= all.length) return;
       commitMessages([...all.slice(0, messageIndex), ...all.slice(messageIndex + 1)]);
+      // 朗读状态是裸下标，删完下标会整体错位，直接停掉比纠正下标更省心
+      speakingIndexRef.current = null;
+      setSpeakingIndex(null);
+      void haltSpeech();
       await persist();
       await refreshChats();
     },

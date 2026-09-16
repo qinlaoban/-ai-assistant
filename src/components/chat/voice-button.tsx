@@ -5,7 +5,7 @@ import {
   useAudioRecorder,
   useAudioRecorderState,
 } from 'expo-audio';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet } from 'react-native';
 
 import { MicIcon } from '@/components/icons';
@@ -16,14 +16,20 @@ import { useChat } from '@/store/chat-store';
 
 export type VoiceStatus = 'idle' | 'recording' | 'transcribing';
 
+/** 录音期间占用的音频模式；用完必须还回去，否则之后的朗读/播放可能没声音 */
+const RECORDING_MODE = { playsInSilentMode: true, allowsRecording: true } as const;
+const IDLE_MODE = { playsInSilentMode: true, allowsRecording: false } as const;
+
 /**
  * 语音输入按钮。
  *
  * 录音用 expo-audio，转写走服务商的 `/audio/transcriptions` —— 复用用户已配好的
  * 接口地址与 Key，不额外引入原生语音识别模块（那类模块还需要自定义开发版构建）。
  *
- * 状态只在「录音中 / 识别中」两个瞬时阶段存在，通过 onStatusChange 上抛给工具栏显示提示，
- * 组件本身不渲染文字，避免工具栏布局随状态抖动。
+ * 三件容易漏、但必须做的事：
+ * - 异常一律转成 onError，绝不静默吞（吞掉的后果是 UI 卡在「录音中」且音频会话不还）
+ * - 卸载时强制停止录音并归还音频会话
+ * - 流式期间禁止「开始」录音，但必须允许「结束」正在进行的录音，否则录音会被卡死
  */
 export function VoiceButton({
   disabled = false,
@@ -34,7 +40,7 @@ export function VoiceButton({
   disabled?: boolean;
   /** 转写成功，把文本交给输入框 */
   onTranscript: (text: string) => void;
-  /** 权限被拒 / 转写失败等，由父级统一用错误条或轻提示呈现 */
+  /** 权限被拒 / 录音或转写失败等，由父级统一呈现 */
   onError: (message: string) => void;
   onStatusChange?: (status: VoiceStatus) => void;
 }) {
@@ -43,6 +49,11 @@ export function VoiceButton({
   const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
   const recorderState = useAudioRecorderState(recorder);
   const [transcribing, setTranscribing] = useState(false);
+  /**
+   * recorderState 是轮询更新的（默认 500ms），点下开始后它不会立刻变成 true。
+   * 没有这个闸门，快速点两下会重复 prepare/record。
+   */
+  const startingRef = useRef(false);
 
   const recording = recorderState.isRecording;
 
@@ -51,24 +62,49 @@ export function VoiceButton({
     onStatusChange?.(transcribing ? 'transcribing' : recording ? 'recording' : 'idle');
   }, [recording, transcribing, onStatusChange]);
 
+  // 卸载收口：录音是设备能力，不主动停止会一直录下去，音频会话也会留在录音态
+  useEffect(
+    () => () => {
+      void (async () => {
+        try {
+          if (recorder.isRecording) await recorder.stop();
+          await setAudioModeAsync(IDLE_MODE);
+        } catch {
+          // 卸载阶段已经没有 UI 可以反馈了，只能静默
+        }
+      })();
+    },
+    [recorder]
+  );
+
   const start = useCallback(async () => {
-    const permission = await AudioModule.requestRecordingPermissionsAsync();
-    if (!permission.granted) {
-      onError('没有麦克风权限，请在系统设置里允许后重试');
-      return;
+    if (startingRef.current) return;
+    startingRef.current = true;
+    try {
+      const permission = await AudioModule.requestRecordingPermissionsAsync();
+      if (!permission.granted) {
+        onError('没有麦克风权限，请在系统设置里允许后重试');
+        return;
+      }
+      // iOS 静音开关下也必须能录到声音
+      await setAudioModeAsync(RECORDING_MODE);
+      await recorder.prepareToRecordAsync();
+      recorder.record();
+    } catch (err) {
+      onError(err instanceof Error ? err.message : '录音启动失败');
+      // 启动失败也要把音频会话还回去，否则后续 TTS 会没声音
+      await setAudioModeAsync(IDLE_MODE).catch(() => undefined);
+    } finally {
+      startingRef.current = false;
     }
-    // iOS 静音开关下也必须能录到声音
-    await setAudioModeAsync({ playsInSilentMode: true, allowsRecording: true });
-    await recorder.prepareToRecordAsync();
-    recorder.record();
   }, [recorder, onError]);
 
   const stop = useCallback(async () => {
-    await recorder.stop();
-    // uri 只有 stop 之后才拿得到
-    const uri = recorder.uri;
     setTranscribing(true);
     try {
+      await recorder.stop();
+      // uri 只有 stop 之后才拿得到
+      const uri = recorder.uri;
       if (!uri) throw new Error('录音失败：没有拿到音频文件');
       const text = await transcribeAudio(uri, {
         apiKey,
@@ -76,37 +112,38 @@ export function VoiceButton({
         model: generationSettings.transcriptionModel,
       });
       onTranscript(text);
-    } catch (error) {
-      onError(error instanceof Error ? error.message : '语音识别失败');
+    } catch (err) {
+      onError(err instanceof Error ? err.message : '语音识别失败');
     } finally {
       setTranscribing(false);
-      // 归还音频会话：录音会独占输入，不还回去之后的朗读/播放可能没声音
-      await setAudioModeAsync({ playsInSilentMode: true, allowsRecording: false });
+      await setAudioModeAsync(IDLE_MODE).catch(() => undefined);
     }
   }, [recorder, apiKey, generationSettings, onTranscript, onError]);
 
   const toggle = useCallback(() => {
     if (transcribing) return;
+    // 结束录音永远优先：哪怕此刻已经在流式输出，也不能把录音卡在半路
     if (recording) {
       void stop();
       return;
     }
+    if (disabled) return;
     void start();
-  }, [recording, transcribing, start, stop]);
+  }, [recording, transcribing, disabled, start, stop]);
 
-  const busy = disabled || transcribing;
+  const pressDisabled = transcribing || (disabled && !recording);
 
   return (
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={recording ? '结束录音并转写' : '语音输入'}
-      accessibilityState={{ disabled: busy, busy: transcribing }}
-      disabled={busy}
+      accessibilityState={{ disabled: pressDisabled, busy: transcribing }}
+      disabled={pressDisabled}
       onPress={toggle}
       hitSlop={8}
       style={({ pressed }) => [
         styles.button,
-        busy && styles.disabled,
+        pressDisabled && styles.disabled,
         pressed && styles.pressed,
       ]}>
       {transcribing ? (

@@ -6,11 +6,13 @@ import {
   buildDateSeparatedList,
   finalizeAssistantMessage,
   formatDayLabel,
+  isSameUsage,
   makeQuote,
   messageVersionView,
   quoteSummary,
   rollbackAssistantSeed,
   seedVersionsFor,
+  shouldPersist,
   squeeze,
   startOfDay,
   switchMessageVersion,
@@ -206,4 +208,25 @@ test('buildDateSeparatedList：无 id 的消息用下标兜底做 key', () => {
   );
   assert.ok(message);
   assert.equal(message.key, 'idx-0');
+});
+
+// ------------------------------------------------------------ 落盘判定
+
+test('shouldPersist：只要会话已建立就写盘（消息被删空也要写）', () => {
+  // 删掉最后一条消息时若跳过写盘，磁盘仍是旧内容，下一次刷新会把消息「读回来」
+  assert.equal(shouldPersist('chat-1'), true);
+});
+
+test('shouldPersist：没有会话 id（新对话还没发过消息）时不写', () => {
+  assert.equal(shouldPersist(null), false);
+  assert.equal(shouldPersist(''), false);
+});
+
+// ------------------------------------------------------------ 用量去重
+
+test('isSameUsage：与上一份完全相同才算重复', () => {
+  const usage = { promptTokens: 1, completionTokens: 2, totalTokens: 3 };
+  assert.equal(isSameUsage(null, usage), false, '还没有收到过就算不上重复');
+  assert.equal(isSameUsage(usage, { ...usage }), true);
+  assert.equal(isSameUsage(usage, { ...usage, totalTokens: 4 }), false);
 });

@@ -330,6 +330,10 @@ function createAbortError(): Error {
 export function isAbortError(error: unknown, signal?: AbortSignal): boolean {
   if (signal?.aborted) return true;
   if (!(error instanceof Error)) return false;
+  // 带 HTTP 状态码的一律是服务端回的错，与「用户取消」无关。
+  // 必须早于下面的兜底正则：服务端文案完全可能含 cancel（如 subscription canceled），
+  // 一旦被判成取消，上层就会静默吞掉这个真实失败（不落错误条、不提示）。
+  if (error instanceof AIError && typeof error.status === 'number') return false;
   return (
     error.name === 'AbortError' ||
     error.name === 'CanceledError' ||

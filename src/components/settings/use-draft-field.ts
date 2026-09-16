@@ -18,15 +18,26 @@ export function useDraftField(
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const draftRef = useRef(saved);
 
+  /**
+   * 调用方传的 `commit` 通常是渲染期内联箭头（身份每次渲染都变）。
+   * 用 ref 承载它，卸载补交的 effect 才能把依赖留空 —— 否则每次按键都会触发一次
+   * cleanup，把 500ms 的防抖击穿成「逐字写文件」。
+   */
+  const commitRef = useRef(commit);
+
+  useEffect(() => {
+    commitRef.current = commit;
+  }, [commit]);
+
   // timerRef 非空即代表「有未提交的改动」，直接拿它当脏标记，不必再维护一个布尔值
   useEffect(
     () => () => {
       if (timerRef.current === null) return;
       clearTimeout(timerRef.current);
       timerRef.current = null;
-      commit(draftRef.current);
+      commitRef.current(draftRef.current);
     },
-    [commit]
+    []
   );
 
   const setDraft = useCallback(

@@ -4,7 +4,7 @@
  * 刻意与 store 分开：这些都是「输入消息 → 输出消息」的纯变换，不依赖 React / 原生模块，
  * 因此可以被 Node 直接加载并单测（沿用 ai-service.ts 的相对路径 + `.ts` 扩展名写法）。
  */
-import type { ChatMessage } from './ai-service.ts';
+import type { ChatMessage, Usage } from './ai-service.ts';
 
 /**
  * 引用的字符上限。
@@ -45,6 +45,31 @@ export interface AssistantSeed {
   versions?: string[];
   /** 续写前缀：extend 模式下以该正文为基础累加增量 */
   appendBase?: string;
+}
+
+/**
+ * 是否该把当前会话写盘。
+ *
+ * 关键点是**不再以「消息为空」为跳过条件**：把最后一条消息删掉时也必须写一次空数组，
+ * 否则磁盘上仍是旧内容，下一次刷新列表 / 重启 App 会把已删消息原样读回来，
+ * 等于用户的删除被静默撤销。只有「还没建会话」（新对话、一条都没发过）才跳过。
+ */
+// 用类型谓词：调用方 `if (!shouldPersist(id)) return;` 之后 id 会被收窄成 string
+export function shouldPersist(chatId: string | null): chatId is string {
+  return typeof chatId === 'string' && chatId.length > 0;
+}
+
+/**
+ * 用量去重：部分网关会把同一份 usage 重复回传，照单累加会让用量成倍放大。
+ * 只有三个字段完全一致的才认定为重复。
+ */
+export function isSameUsage(previous: Usage | null, next: Usage): boolean {
+  if (!previous) return false;
+  return (
+    previous.promptTokens === next.promptTokens &&
+    previous.completionTokens === next.completionTokens &&
+    previous.totalTokens === next.totalTokens
+  );
 }
 
 /** 把下标钳制到 [0, length-1]，非法值回退到最后一项 */

@@ -79,12 +79,11 @@ export function ChatDrawerHost({ children }: { children: ReactNode }) {
  */
 function DrawerContent({ onClose }: { onClose: () => void }) {
   const theme = useTheme();
-  const { model, generationSettings, startNewChat, refreshChats } = useChat();
+  const { model, generationSettings, startNewChat } = useChat();
 
-  // 每次拉开都刷新一遍列表：抽屉没有「页面聚焦」事件可用
-  useEffect(() => {
-    void refreshChats();
-  }, [refreshChats]);
+  // 这里刻意不刷新列表：chats 在 store 里一直被就地维护（新建 / 重命名 / 删除 / 流式收尾
+  // 都会同步），而 refreshChats 是「读全部文件 → 整体覆盖」，流式进行中拉开抽屉时
+  // 那份过期快照可能在就地更新之后落地，把当前会话的顺序和标题盖回旧值。
 
   const handleNewChat = () => {
     startNewChat();

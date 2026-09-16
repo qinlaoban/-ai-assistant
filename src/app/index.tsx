@@ -41,6 +41,7 @@ import {
   MAX_ATTACHMENTS,
   pickImageAttachments,
   pickTextAttachments,
+  type PickResult,
 } from '@/services/attachments';
 import { exportConversation } from '@/services/chat-export';
 import { quoteSummary } from '@/services/chat-messages';
@@ -59,13 +60,22 @@ function ApiKeySetup() {
   const { updateApiKey, error } = useChat();
   const [value, setValue] = useState('');
   const [busy, setBusy] = useState(false);
+  /** 保存失败要能自己呈现：store 的 error 只覆盖请求期错误，写 Key 失败不进那里 */
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   const submit = async () => {
     if (value.trim().length === 0) return;
     setBusy(true);
-    await updateApiKey(value);
-    setBusy(false);
-    setValue('');
+    setSaveError(null);
+    try {
+      await updateApiKey(value);
+      setValue('');
+    } catch (err) {
+      // 不兜住的话 busy 会一直是 true，「保存并开始」永久禁用 —— 首次启动直接把人卡死
+      setSaveError(err instanceof Error ? err.message : '保存失败，请重试');
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -110,8 +120,8 @@ function ApiKeySetup() {
         <Text style={[styles.primaryButtonText, { color: theme.onPrimary }]}>保存并开始</Text>
       </Pressable>
 
-      {error ? (
-        <Text style={[styles.setupError, { color: theme.danger }]}>{error}</Text>
+      {error || saveError ? (
+        <Text style={[styles.setupError, { color: theme.danger }]}>{error ?? saveError}</Text>
       ) : null}
     </View>
   );
@@ -165,7 +175,8 @@ export default function ChatScreen() {
 
   /** 当前被长按的消息下标；null 表示操作表关闭 */
   const [actionIndex, setActionIndex] = useState<number | null>(null);
-  const [toast, setToast] = useState<string | null>(null);
+  /** seq 用于让「同一句文案再提示一次」也能重新播放动画 */
+  const [toast, setToast] = useState<{ text: string; seq: number } | null>(null);
   /** 会话内搜索：是否展开、关键词、当前命中的第几条（0 起） */
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -188,7 +199,10 @@ export default function ChatScreen() {
   /** 附件选择浮层 */
   const [attachOpen, setAttachOpen] = useState(false);
 
-  const notify = useCallback((text: string) => setToast(text), []);
+  const notify = useCallback(
+    (text: string) => setToast((prev) => ({ text, seq: (prev?.seq ?? 0) + 1 })),
+    []
+  );
   // 停留时长由 Toast 自己掌握，这里只负责在它播完动画后把文案清掉
   const handleToastHidden = useCallback(() => setToast(null), []);
   // 关闭回调必须稳定：它进了操作表手势识别器的依赖，每次渲染换新函数会重建识别器
@@ -247,12 +261,17 @@ export default function ChatScreen() {
   const closeAttach = useCallback(() => setAttachOpen(false), []);
 
   const addAttachments = useCallback(
-    async (picker: () => Promise<MessageAttachment[]>) => {
+    async (picker: () => Promise<PickResult>) => {
       try {
-        const picked = await picker();
+        const { attachments: picked, rejected } = await picker();
+        // 被跳过的文件（类型不支持 / 体积超限）必须明确告知，不能悄悄丢掉
+        if (rejected.length > 0) {
+          notify(`已跳过：${rejected.join('、')}`);
+        }
         if (picked.length === 0) return;
-        const overflow = attachments.length + picked.length > MAX_ATTACHMENTS;
-        if (overflow) notify(`一条消息最多带 ${MAX_ATTACHMENTS} 个附件`);
+        if (attachments.length + picked.length > MAX_ATTACHMENTS) {
+          notify(`一条消息最多带 ${MAX_ATTACHMENTS} 个附件`);
+        }
         setAttachments([...attachments, ...picked].slice(0, MAX_ATTACHMENTS));
       } catch (err) {
         notify(err instanceof Error ? err.message : '选择附件失败');
@@ -650,7 +669,8 @@ export default function ChatScreen() {
       </KeyboardAvoidingView>
 
       <Toast
-        message={toast}
+        message={toast?.text ?? null}
+        seq={toast?.seq ?? 0}
         bottom={composerBottomInset + TOAST_OFFSET}
         onHidden={handleToastHidden}
       />

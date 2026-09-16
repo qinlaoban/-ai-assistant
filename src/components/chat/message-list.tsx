@@ -35,8 +35,12 @@ const MAX_TO_RENDER_PER_BATCH = 10;
 const WINDOW_SIZE = 10;
 /** 「今天」基准的刷新间隔：只为跨天时校正分隔文案 */
 const MINUTE = 60_000;
-/** 变高行跳转失败后的最大重试次数，避免 onScrollToIndexFailed 反复触发形成死循环 */
-const MAX_JUMP_RETRY = 1;
+/**
+ * 变高行跳转失败后的最大重试次数。
+ * Markdown 行（长代码块/表格）首次跳转往往要测量一两次才成功，给 2 次预算；
+ * 上限是必须的，否则 onScrollToIndexFailed 一直失败会形成重试死循环。
+ */
+const MAX_JUMP_RETRY = 2;
 
 /** 日期分隔条：居中的浅色胶囊，弱化处理不抢正文 */
 const DateSeparator = memo(function DateSeparator({ label }: { label: string }) {
@@ -159,6 +163,8 @@ export function MessageList({
   const followingRef = useRef(true);
   const prevLengthRef = useRef(messages.length);
   const prevKeyRef = useRef(conversationKey);
+  /** 上一次已经贴过底的会话；切会话时用来判断要不要重新贴底 */
+  const lastBottomKeyRef = useRef(conversationKey);
   /**
    * 已处理过的跳转请求。data 会随流式刷新反复变化，必须靠它区分
    * 「用户点了上/下一条」和「只是列表内容变了」，否则流式期间会被反复拉回命中位置。
@@ -202,6 +208,18 @@ export function MessageList({
     prevKeyRef.current = conversationKey;
     prevLengthRef.current = messages.length;
   }, [conversationKey, messages.length]);
+
+  /**
+   * 切换会话时直接贴底。
+   * 不能只依赖 onContentSizeChange：两个会话内容高度接近时它的回调根本不触发，
+   * 列表会停在上一个会话的滚动位置。data 也放在依赖里，确保等新会话渲染完再滚。
+   */
+  useEffect(() => {
+    if (lastBottomKeyRef.current === conversationKey) return;
+    lastBottomKeyRef.current = conversationKey;
+    followingRef.current = true;
+    listRef.current?.scrollToEnd({ animated: false });
+  }, [conversationKey, data]);
 
   // 搜索跳转：把目标消息滚到视窗中部；同时关掉「跟读」，免得被后续的自动滚动拉回底部
   useEffect(() => {

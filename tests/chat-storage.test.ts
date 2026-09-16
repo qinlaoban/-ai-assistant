@@ -230,6 +230,29 @@ test('loadChat：messages 不是数组返回 null', async () => {
   assert.equal(await storage.loadChat('nomsg'), null);
 });
 
+test('saveChat：消息被删空后写盘，读回空数组且不再进列表（删除不会被撤销）', async () => {
+  const id = storage.createChatId();
+  await storage.saveChat({
+    id,
+    title: 't',
+    createdAt: 1,
+    updatedAt: 1,
+    messages: [{ role: 'user', content: 'a' }],
+  });
+  // 删掉最后一条消息后必须再写一次，否则磁盘仍是旧内容，刷新会把消息读回来
+  await storage.saveChat({ id, title: 't', createdAt: 1, updatedAt: 2, messages: [] });
+
+  const loaded = await storage.loadChat(id);
+  assert.ok(loaded);
+  assert.deepEqual(loaded.messages, []);
+
+  const list = await storage.listChats();
+  assert.ok(
+    !list.some((chat) => chat.id === id),
+    '空消息会话只在文件里，不该出现在列表'
+  );
+});
+
 test('loadChat：旧格式没有 updatedAt 时回落为 createdAt', async () => {
   const id = storage.createChatId();
   mem.setItem(

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { addUsage, isAbortError, ZERO_USAGE } from '../src/services/ai-service.ts';
+import { addUsage, AIError, isAbortError, ZERO_USAGE } from '../src/services/ai-service.ts';
 
 /** 造一个指定 name/message 的错误，用来还原各平台抛出的真实形状 */
 function errorLike(name: string, message: string): Error {
@@ -59,6 +59,14 @@ test('isAbortError：非 Error 值一律不算取消', () => {
   assert.equal(isAbortError('boom'), false);
   assert.equal(isAbortError(null), false);
   assert.equal(isAbortError(undefined), false);
+});
+
+test('isAbortError：带 HTTP 状态码的 AIError 一律不是取消，哪怕文案含 cancel', () => {
+  // 服务端完全可能回「subscription canceled / request canceled」这类文案；
+  // 兜底正则按消息文本匹配，会把这种真实失败当成用户取消静默吞掉（不落错误条）
+  assert.equal(isAbortError(new AIError('Your subscription was canceled', 402)), false);
+  assert.equal(isAbortError(new AIError('request canceled by the server', 400)), false);
+  assert.equal(isAbortError(new AIError('model not found', 404)), false);
 });
 
 // ------------------------------------------------------------ 用量累加

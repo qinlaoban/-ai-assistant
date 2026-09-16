@@ -84,8 +84,8 @@ export function MessageActions({
           label: '引用',
           onPress: () => {
             if (index === null) return;
-            quoteMessage(index);
-            onNotify('已引用到输入框');
+            // 空消息 / 纯空白没有可引用的内容，此时不能谎报「已引用」
+            if (quoteMessage(index)) onNotify('已引用到输入框');
           },
         },
         // 朗读只对助手回答有意义；正在念的那条再点一次即停止

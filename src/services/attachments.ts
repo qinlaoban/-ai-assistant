@@ -19,6 +19,27 @@ import type { ChatMessage, MessageAttachment } from './ai-service.ts';
 export const MAX_ATTACHMENTS = 4;
 /** 单个文本文件最多内联多少字符，超出截断 */
 export const TEXT_FILE_MAX_CHARS = 20_000;
+/**
+ * 单个文本文件允许读入的最大字节。
+ * 必须在**读文件之前**拦一道：TEXT_FILE_MAX_CHARS 是读完才截断，
+ * 对几百 MB 的日志/导出文件来说，读到一半就已经把内存打爆了。
+ */
+export const MAX_TEXT_FILE_BYTES = 512 * 1024;
+
+export interface PickResult {
+  attachments: MessageAttachment[];
+  /** 被跳过的文件名（类型不支持或体积超限）；调用方应当明确告知用户 */
+  rejected: string[];
+}
+
+/**
+ * 体积是否在可内联范围内。
+ * 拿不到体积时（部分平台不上报 size）放行，交给读完之后的长度截断兜底。
+ */
+export function isWithinTextLimit(sizeBytes?: number | null): boolean {
+  if (typeof sizeBytes !== 'number' || !Number.isFinite(sizeBytes)) return true;
+  return sizeBytes <= MAX_TEXT_FILE_BYTES;
+}
 /** data URL 内存缓存条数上限 */
 const DATA_URL_CACHE_LIMIT = 20;
 
@@ -89,9 +110,21 @@ async function readAsDataUrl(uri: string, mimeType: string): Promise<string> {
     dataUrl = `data:${mimeType};base64,${base64}`;
   }
 
-  if (dataUrlCache.size >= DATA_URL_CACHE_LIMIT) dataUrlCache.clear();
+  // 淘汰最老的一条而不是整表清空：整表清空会让「同一条消息里已经读过的图」被再读一遍
+  if (dataUrlCache.size >= DATA_URL_CACHE_LIMIT) {
+    const oldest = dataUrlCache.keys().next().value;
+    if (oldest !== undefined) dataUrlCache.delete(oldest);
+  }
   dataUrlCache.set(uri, dataUrl);
   return dataUrl;
+}
+
+/**
+ * 清空 data URL 缓存。
+ * base64 体积很大（单张可达数 MB），切换会话时应该释放掉上一会话的图。
+ */
+export function clearAttachmentCache(): void {
+  dataUrlCache.clear();
 }
 
 /**
@@ -135,9 +168,21 @@ async function persistImage(uri: string, mimeType: string | null | undefined): P
   return target;
 }
 
+/**
+ * 复制到文档目录失败（磁盘满、源 uri 是 ph:// 之类）时退回原始路径。
+ * 只影响持久性——重启后图片可能读不到——但至少本次会话还能用，
+ * 所以不抛错，只留下线索方便排查。
+ */
+async function persistImageSafely(uri: string, mimeType: string | null | undefined): Promise<string> {
+  return persistImage(uri, mimeType).catch((error: unknown) => {
+    console.warn('[attachments] 图片未能复制到文档目录，重启后可能读不到:', error);
+    return uri;
+  });
+}
+
 async function toImageAttachment(asset: ImagePicker.ImagePickerAsset): Promise<MessageAttachment> {
   const mimeType = guessImageMime(asset.uri, asset.mimeType);
-  const uri = await persistImage(asset.uri, asset.fileName ?? mimeType).catch(() => asset.uri);
+  const uri = await persistImageSafely(asset.uri, asset.fileName ?? mimeType);
   return {
     id: createAttachmentId(),
     kind: 'image',
@@ -148,12 +193,14 @@ async function toImageAttachment(asset: ImagePicker.ImagePickerAsset): Promise<M
   };
 }
 
-function toImageAttachments(assets: ImagePicker.ImagePickerAsset[]): Promise<MessageAttachment[]> {
-  return Promise.all(assets.slice(0, MAX_ATTACHMENTS).map(toImageAttachment));
+function toImageAttachments(assets: ImagePicker.ImagePickerAsset[]): Promise<PickResult> {
+  return Promise.all(assets.slice(0, MAX_ATTACHMENTS).map(toImageAttachment)).then(
+    (attachments) => ({ attachments, rejected: [] })
+  );
 }
 
 /** 从相册选择图片 */
-export async function pickImageAttachments(): Promise<MessageAttachment[]> {
+export async function pickImageAttachments(): Promise<PickResult> {
   const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
   if (!permission.granted) throw new Error('没有相册权限，请在系统设置里允许后重试');
   const result = await ImagePicker.launchImageLibraryAsync({
@@ -162,44 +209,52 @@ export async function pickImageAttachments(): Promise<MessageAttachment[]> {
     selectionLimit: MAX_ATTACHMENTS,
     quality: 0.8,
   });
-  if (result.canceled) return [];
+  if (result.canceled) return { attachments: [], rejected: [] };
   return toImageAttachments(result.assets);
 }
 
 /** 拍照 */
-export async function captureImageAttachment(): Promise<MessageAttachment[]> {
+export async function captureImageAttachment(): Promise<PickResult> {
   const permission = await ImagePicker.requestCameraPermissionsAsync();
   if (!permission.granted) throw new Error('没有相机权限，请在系统设置里允许后重试');
   const result = await ImagePicker.launchCameraAsync({ quality: 0.8 });
-  if (result.canceled) return [];
+  if (result.canceled) return { attachments: [], rejected: [] };
   return toImageAttachments(result.assets);
 }
 
 /**
- * 选择文本类文件。非文本类型直接拒绝并说明原因 —— 与其发出去让模型答非所问，
- * 不如当场告诉用户「这种文件不支持」。
+ * 选择文本类文件。
+ *
+ * 不支持的文件不会静默消失，而是放进 `rejected` 由调用方明确告知用户 ——
+ * 「悄悄丢掉」比「直接失败」更难排查。体积超限的会在**读文件之前**被拦下。
  */
-export async function pickTextAttachments(): Promise<MessageAttachment[]> {
+export async function pickTextAttachments(): Promise<PickResult> {
   const result = await DocumentPicker.getDocumentAsync({
     type: '*/*',
     multiple: true,
     // 保持默认的 true：选完要立刻用 file-system 读取内容
     copyToCacheDirectory: true,
   });
-  if (result.canceled) return [];
+  if (result.canceled) return { attachments: [], rejected: [] };
 
   const assets = result.assets.slice(0, MAX_ATTACHMENTS);
-  const unsupported: string[] = [];
+  const rejected: string[] = [];
   const attachments: MessageAttachment[] = [];
 
   for (const asset of assets) {
     if (!isTextLike(asset.name, asset.mimeType)) {
-      unsupported.push(asset.name);
+      rejected.push(asset.name);
       continue;
     }
+    // 必须在读之前拦：TEXT_FILE_MAX_CHARS 是读完才截断，挡不住超大文件
+    if (!isWithinTextLimit(asset.size)) {
+      rejected.push(`${asset.name}（超过 ${Math.floor(MAX_TEXT_FILE_BYTES / 1024)}KB）`);
+      continue;
+    }
+
     const raw = await FileSystem.readAsStringAsync(asset.uri).catch(() => '');
     if (raw.length === 0) {
-      unsupported.push(asset.name);
+      rejected.push(asset.name);
       continue;
     }
     const text =
@@ -217,8 +272,5 @@ export async function pickTextAttachments(): Promise<MessageAttachment[]> {
     });
   }
 
-  if (unsupported.length > 0 && attachments.length === 0) {
-    throw new Error(`暂不支持这些文件类型：${unsupported.join('、')}。目前支持图片与文本类文件。`);
-  }
-  return attachments;
+  return { attachments, rejected };
 }

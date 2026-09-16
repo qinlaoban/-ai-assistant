@@ -61,6 +61,10 @@ export function EndpointSection() {
     if (!preset.models.includes(modelField.draft)) {
       modelField.setDraft(preset.models[0], true);
     }
+    // 转写模型是服务商相关的：换服务商时不重置，会把 whisper-1 发到不认它的地址上
+    if (provider?.key !== preset.key) {
+      transcriptionField.setDraft(DEFAULT_TRANSCRIPTION_MODEL, true);
+    }
   };
 
   const endpoint = `${normalizeBaseUrl(generationSettings.apiBaseUrl)}/chat/completions`;
