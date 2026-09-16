@@ -32,8 +32,13 @@ export default function SettingsScreen() {
         style={styles.scroll}
         contentContainerStyle={[
           styles.content,
-          // 与对话页、会话页保持一致：iOS 会自动避开安全区，Android 得自己让开状态栏
+          // 顶部：与对话页、会话页保持一致，iOS 由原生安全区自动让开，Android 得自己让开状态栏
           Platform.OS === 'android' && { paddingTop: insets.top + Spacing.three },
+          // 底部：原生 tab bar 覆盖在内容之上，且不会给这个 ScrollView 自动加 contentInset，
+          // 不自己让出高度时，最后一行「所有配置仅保存在本机…」会被 tab bar 压住。
+          // insets.bottom 已包含 tab bar（见 index.tsx 的说明）；Android 的 tab 页已被原生
+          // SafeAreaView 垫开，这里只留视觉间距即可。
+          Platform.OS === 'ios' && { paddingBottom: insets.bottom + Spacing.five },
         ]}
         automaticallyAdjustKeyboardInsets
         keyboardShouldPersistTaps="handled">
@@ -101,7 +106,7 @@ export default function SettingsScreen() {
 const styles = StyleSheet.create({
   screen: { flex: 1 },
   scroll: { flex: 1 },
-  // 底部避开 tab bar 的留白由原生自动 contentInset 提供，这里只留视觉间距
+  // 这里的 paddingBottom 只是基础视觉间距；iOS 避开 tab bar 的额外间距在 contentContainerStyle 里按安全区追加
   content: { paddingHorizontal: Spacing.four, paddingBottom: Spacing.five },
   inner: { width: '100%', maxWidth: MaxContentWidth, alignSelf: 'center', gap: Spacing.four },
   pageTitle: { paddingTop: Spacing.four },
