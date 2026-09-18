@@ -1,13 +1,10 @@
-import * as FileSystem from 'expo-file-system/legacy';
-import * as SecureStore from 'expo-secure-store';
-import { Platform } from 'react-native';
-
 import {
   DEFAULT_GENERATION_SETTINGS,
   normalizeGenerationSettings,
   type GenerationSettings,
-} from '../constants/chat-params';
-import type { ChatMessage, Usage } from './ai-service';
+} from '../constants/chat-params.ts';
+import type { ChatMessage, Usage } from './ai-service.ts';
+import type { StorageBackend } from './key-value-store.ts';
 
 export interface ChatSummary {
   id: string;
@@ -22,101 +19,46 @@ export interface StoredChat extends ChatSummary {
   usage?: Usage;
 }
 
+/**
+ * 密钥的存储键名。原生端落在 SecureStore，web 端是 localStorage。
+ * **不能改**：改了等于让老用户的 Key 「消失」。
+ */
 const KEY_API = 'ai_assistant_api_key';
 const KEY_MODEL = 'ai_assistant_model';
-/** 生成参数的存储键：原生端是 settings.json，web 端是 localStorage 的这个 key */
-const KEY_SETTINGS = 'ai_assistant_settings';
-const WEB_CHAT_PREFIX = 'ai_assistant:chat:';
+
+/**
+ * 其余数据都按「路径」存取，路径本身与平台无关：
+ * 原生端就是文件树，web 端由 src/platform/store.ts 映射成扁平 key。
+ */
+const SETTINGS_PATH = 'settings.json';
+const CHATS_DIR = 'chats/';
+const DRAFTS_DIR = 'drafts/';
+const CHAT_EXT = '.json';
+
+const chatPath = (id: string): string => `${CHATS_DIR}${id}${CHAT_EXT}`;
+const draftPath = (draftId: string): string => `${DRAFTS_DIR}${draftId}.txt`;
+
 const EMPTY_TITLE = '新对话';
 /** 重命名可以比自动标题长一些，但得挡住整段粘贴。输入框与存储层共用同一个上限 */
 export const TITLE_MAX_LENGTH = 60;
 
-/**
- * web 静态导出（`output: "static"`）会在 Node 里预渲染，那时没有 window；
- * 隐私模式下访问 localStorage 也会抛错。所以必须惰性取、取不到就降级。
- */
-function webStore(): Storage | null {
-  try {
-    if (typeof window === 'undefined' || !window.localStorage) return null;
-    return window.localStorage;
-  } catch {
-    return null;
-  }
-}
-
-/** 原生端文档目录；web 上 documentDirectory 为 null */
-const nativeChatDir =
-  Platform.OS === 'web' || !FileSystem.documentDirectory
-    ? null
-    : `${FileSystem.documentDirectory}chats/`;
+let backend: StorageBackend | null = null;
 
 /**
- * 生成参数单独落一个文件，不进 SecureStore：
- * SecureStore 单值上限约 2KB，装不下可能很长的系统提示词，而这里也没有敏感信息
- * （API Key 仍旧只存在 SecureStore 里）。
+ * 注入存储后端。**只有测试会调用它**：给了后端，本模块就不会去动态加载
+ * `src/platform/store.ts`，于是 Node 里跑测试时完全没有 react-native / expo-* 参与。
  */
-const nativeSettingsUri =
-  Platform.OS === 'web' || !FileSystem.documentDirectory
-    ? null
-    : `${FileSystem.documentDirectory}settings.json`;
-
-// ---------------------------------------------------------------- 底层读写
-
-async function readRaw(id: string): Promise<string | null> {
-  if (Platform.OS === 'web') {
-    return webStore()?.getItem(WEB_CHAT_PREFIX + id) ?? null;
-  }
-  if (!nativeChatDir) return null;
-  try {
-    return await FileSystem.readAsStringAsync(`${nativeChatDir}${id}.json`);
-  } catch {
-    return null; // 文件不存在
-  }
+export function setStorageBackend(next: StorageBackend): void {
+  backend = next;
 }
 
-async function writeRaw(id: string, json: string): Promise<void> {
-  if (Platform.OS === 'web') {
-    webStore()?.setItem(WEB_CHAT_PREFIX + id, json);
-    return;
-  }
-  if (!nativeChatDir) return;
-  await FileSystem.makeDirectoryAsync(nativeChatDir, { intermediates: true });
-  await FileSystem.writeAsStringAsync(`${nativeChatDir}${id}.json`, json);
-}
-
-async function removeRaw(id: string): Promise<void> {
-  if (Platform.OS === 'web') {
-    webStore()?.removeItem(WEB_CHAT_PREFIX + id);
-    return;
-  }
-  if (!nativeChatDir) return;
-  try {
-    await FileSystem.deleteAsync(`${nativeChatDir}${id}.json`, { idempotent: true });
-  } catch {
-    // 已经没了就算了
-  }
-}
-
-async function listRawIds(): Promise<string[]> {
-  if (Platform.OS === 'web') {
-    const ls = webStore();
-    if (!ls) return [];
-    const ids: string[] = [];
-    for (let i = 0; i < ls.length; i += 1) {
-      const key = ls.key(i);
-      if (key && key.startsWith(WEB_CHAT_PREFIX)) {
-        ids.push(key.slice(WEB_CHAT_PREFIX.length));
-      }
-    }
-    return ids;
-  }
-  if (!nativeChatDir) return [];
-  try {
-    const files = await FileSystem.readDirectoryAsync(nativeChatDir);
-    return files.filter((f) => f.endsWith('.json')).map((f) => f.slice(0, -'.json'.length));
-  } catch {
-    return []; // 目录还不存在
-  }
+/**
+ * 平台实现按需加载 —— 本模块的顶层 import 因此是纯的，测试可以先注入内存后端，
+ * 原生模块永远不被触达。
+ */
+async function getBackend(): Promise<StorageBackend> {
+  if (!backend) backend = (await import('../platform/store.ts')).platformBackend;
+  return backend;
 }
 
 // ---------------------------------------------------------------- 会话
@@ -134,7 +76,8 @@ export function deriveTitle(text: string): string {
 
 export async function saveChat(chat: StoredChat): Promise<void> {
   try {
-    await writeRaw(chat.id, JSON.stringify(chat));
+    const { files } = await getBackend();
+    await files.write(chatPath(chat.id), JSON.stringify(chat));
   } catch (error) {
     console.warn('[chat-storage] 保存会话失败:', error);
   }
@@ -156,7 +99,8 @@ function sanitizeUsage(raw: unknown): Usage | undefined {
 }
 
 export async function loadChat(id: string): Promise<StoredChat | null> {
-  const raw = await readRaw(id);
+  const { files } = await getBackend();
+  const raw = await files.read(chatPath(id));
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw) as Partial<StoredChat>;
@@ -177,13 +121,18 @@ export async function loadChat(id: string): Promise<StoredChat | null> {
 }
 
 export async function listChats(): Promise<ChatSummary[]> {
-  const ids = await listRawIds();
+  const { files } = await getBackend();
+  // 只看 .json：目录里混进别的文件不该把整个列表带崩
+  const paths = (await files.list(CHATS_DIR)).filter((path) => path.endsWith(CHAT_EXT));
+
   // 并行读取：会话数多时，串行逐个 await 会把列表耗时累加成 Σ 每个文件的读取时间
-  const raws = await Promise.all(ids.map((id) => readRaw(id)));
+  const raws = await Promise.all(paths.map((path) => files.read(path)));
+
   const chats: ChatSummary[] = [];
   raws.forEach((raw, index) => {
     if (!raw) return;
-    const id = ids[index];
+    // 路径 → id：chats/<id>.json 里掐掉目录前缀与扩展名
+    const id = paths[index].slice(CHATS_DIR.length, -CHAT_EXT.length);
     try {
       const parsed = JSON.parse(raw) as Partial<StoredChat>;
       if (!Array.isArray(parsed.messages) || parsed.messages.length === 0) return;
@@ -202,7 +151,8 @@ export async function listChats(): Promise<ChatSummary[]> {
 }
 
 export async function deleteChat(id: string): Promise<void> {
-  await removeRaw(id);
+  const { files } = await getBackend();
+  await files.remove(chatPath(id));
 }
 
 /**
@@ -225,74 +175,52 @@ export async function renameChat(id: string, title: string): Promise<ChatSummary
 // ---------------------------------------------------------------- 配置
 
 export async function getApiKey(): Promise<string | null> {
-  if (Platform.OS === 'web') return webStore()?.getItem(KEY_API) ?? null;
   try {
-    return await SecureStore.getItemAsync(KEY_API);
+    const { secrets } = await getBackend();
+    return await secrets.get(KEY_API);
   } catch {
-    // 某些设备/模拟器上 SecureStore 不可用，不应因此卡死启动流程
+    // 存储不可用（隐私模式 / SecureStore 故障）不该卡死启动流程
     return null;
   }
 }
 
 export async function saveApiKey(key: string): Promise<void> {
-  if (Platform.OS === 'web') {
-    webStore()?.setItem(KEY_API, key);
-    return;
-  }
-  await SecureStore.setItemAsync(KEY_API, key);
+  const { secrets } = await getBackend();
+  await secrets.set(KEY_API, key);
 }
 
 export async function clearApiKey(): Promise<void> {
-  if (Platform.OS === 'web') {
-    webStore()?.removeItem(KEY_API);
-    return;
-  }
-  await SecureStore.deleteItemAsync(KEY_API);
+  const { secrets } = await getBackend();
+  await secrets.remove(KEY_API);
 }
 
 export async function getModel(): Promise<string | null> {
-  if (Platform.OS === 'web') return webStore()?.getItem(KEY_MODEL) ?? null;
   try {
-    return await SecureStore.getItemAsync(KEY_MODEL);
+    const { secrets } = await getBackend();
+    return await secrets.get(KEY_MODEL);
   } catch {
     return null;
   }
 }
 
 export async function saveModel(model: string): Promise<void> {
-  if (Platform.OS === 'web') {
-    webStore()?.setItem(KEY_MODEL, model);
-    return;
-  }
-  await SecureStore.setItemAsync(KEY_MODEL, model);
+  const { secrets } = await getBackend();
+  await secrets.set(KEY_MODEL, model);
 }
 
 // ---------------------------------------------------------------- 生成参数
 
-async function readSettingsRaw(): Promise<string | null> {
-  if (Platform.OS === 'web') return webStore()?.getItem(KEY_SETTINGS) ?? null;
-  if (!nativeSettingsUri) return null;
-  try {
-    return await FileSystem.readAsStringAsync(nativeSettingsUri);
-  } catch {
-    return null; // 文件还不存在，属正常情况
-  }
-}
-
-async function writeSettingsRaw(json: string): Promise<void> {
-  if (Platform.OS === 'web') {
-    webStore()?.setItem(KEY_SETTINGS, json);
-    return;
-  }
-  if (!nativeSettingsUri) return;
-  await FileSystem.writeAsStringAsync(nativeSettingsUri, json);
-}
-
-/** 读生成参数。任何异常都收敛成默认值——启动期读配置失败不该拖垮应用 */
+/**
+ * 生成参数与密钥分开存：SecureStore 单值上限约 2KB，装不下可能很长的系统提示词，
+ * 而这里也没有敏感信息（密钥仍旧只存在 SecureStore 里）。
+ *
+ * 任何异常都收敛成默认值——启动期读配置失败不该拖垮应用。
+ */
 export async function getGenerationSettings(): Promise<GenerationSettings> {
-  const raw = await readSettingsRaw();
-  if (!raw) return DEFAULT_GENERATION_SETTINGS;
   try {
+    const { files } = await getBackend();
+    const raw = await files.read(SETTINGS_PATH);
+    if (!raw) return DEFAULT_GENERATION_SETTINGS;
     return normalizeGenerationSettings(JSON.parse(raw));
   } catch {
     return DEFAULT_GENERATION_SETTINGS;
@@ -302,7 +230,8 @@ export async function getGenerationSettings(): Promise<GenerationSettings> {
 /** 写生成参数；写入前先归一化，避免把越界数值落盘 */
 export async function saveGenerationSettings(settings: GenerationSettings): Promise<void> {
   try {
-    await writeSettingsRaw(JSON.stringify(normalizeGenerationSettings(settings)));
+    const { files } = await getBackend();
+    await files.write(SETTINGS_PATH, JSON.stringify(normalizeGenerationSettings(settings)));
   } catch (error) {
     console.warn('[chat-storage] 保存生成参数失败:', error);
   }
@@ -313,52 +242,14 @@ export async function saveGenerationSettings(settings: GenerationSettings): Prom
 /** 还没落盘的新对话没有 id，用这个固定 key 暂存草稿 */
 export const NEW_CHAT_DRAFT_ID = '__new__';
 
-const KEY_DRAFT_PREFIX = 'ai_assistant:draft:';
-
-/** 草稿目录：与 chats/ 平级，一个会话一个纯文本文件 */
-const nativeDraftDir =
-  Platform.OS === 'web' || !FileSystem.documentDirectory
-    ? null
-    : `${FileSystem.documentDirectory}drafts/`;
-
-async function readDraftRaw(draftId: string): Promise<string | null> {
-  if (Platform.OS === 'web') {
-    return webStore()?.getItem(KEY_DRAFT_PREFIX + draftId) ?? null;
-  }
-  if (!nativeDraftDir) return null;
-  try {
-    return await FileSystem.readAsStringAsync(`${nativeDraftDir}${draftId}.txt`);
-  } catch {
-    return null; // 没有草稿是常态
-  }
-}
-
-async function writeDraftRaw(draftId: string, text: string): Promise<void> {
-  if (Platform.OS === 'web') {
-    webStore()?.setItem(KEY_DRAFT_PREFIX + draftId, text);
-    return;
-  }
-  if (!nativeDraftDir) return;
-  await FileSystem.makeDirectoryAsync(nativeDraftDir, { intermediates: true });
-  await FileSystem.writeAsStringAsync(`${nativeDraftDir}${draftId}.txt`, text);
-}
-
-async function removeDraftRaw(draftId: string): Promise<void> {
-  if (Platform.OS === 'web') {
-    webStore()?.removeItem(KEY_DRAFT_PREFIX + draftId);
-    return;
-  }
-  if (!nativeDraftDir) return;
-  try {
-    await FileSystem.deleteAsync(`${nativeDraftDir}${draftId}.txt`, { idempotent: true });
-  } catch {
-    // 已经没了就算了
-  }
-}
-
 /** 读某条会话的输入草稿；没有则返回空串 */
 export async function getDraft(draftId: string): Promise<string> {
-  return (await readDraftRaw(draftId)) ?? '';
+  try {
+    const { files } = await getBackend();
+    return (await files.read(draftPath(draftId))) ?? '';
+  } catch {
+    return ''; // 没有草稿是常态
+  }
 }
 
 /**
@@ -366,12 +257,13 @@ export async function getDraft(draftId: string): Promise<string> {
  * 否则每发一次消息都会在磁盘上留下一个空文件。
  */
 export async function saveDraft(draftId: string, text: string): Promise<void> {
+  const { files } = await getBackend();
   if (text.length === 0) {
-    await removeDraftRaw(draftId);
+    await files.remove(draftPath(draftId));
     return;
   }
   try {
-    await writeDraftRaw(draftId, text);
+    await files.write(draftPath(draftId), text);
   } catch (error) {
     console.warn('[chat-storage] 保存草稿失败:', error);
   }
@@ -379,5 +271,6 @@ export async function saveDraft(draftId: string, text: string): Promise<void> {
 
 /** 发送后清掉草稿 */
 export async function clearDraft(draftId: string): Promise<void> {
-  await removeDraftRaw(draftId);
+  const { files } = await getBackend();
+  await files.remove(draftPath(draftId));
 }

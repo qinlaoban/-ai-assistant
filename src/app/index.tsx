@@ -13,7 +13,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { ActionSheet, type SheetAction } from '@/components/action-sheet';
-import { AnimatedIcon } from '@/components/animated-icon';
+import { ApiKeySetup } from '@/components/api-key-setup';
 import { useChatDrawer } from '@/components/chat-drawer';
 import { MessageActions } from '@/components/chat/message-actions';
 import { MessageList } from '@/components/chat/message-list';
@@ -54,78 +54,6 @@ const TOAST_OFFSET = 72;
 
 /** 空附件列表的稳定引用：直接写 [] 字面量会让依赖它的 useCallback 每次渲染都失效 */
 const NO_ATTACHMENTS: MessageAttachment[] = [];
-
-function ApiKeySetup() {
-  const theme = useTheme();
-  const { updateApiKey, error } = useChat();
-  const [value, setValue] = useState('');
-  const [busy, setBusy] = useState(false);
-  /** 保存失败要能自己呈现：store 的 error 只覆盖请求期错误，写 Key 失败不进那里 */
-  const [saveError, setSaveError] = useState<string | null>(null);
-
-  const submit = async () => {
-    if (value.trim().length === 0) return;
-    setBusy(true);
-    setSaveError(null);
-    try {
-      await updateApiKey(value);
-      setValue('');
-    } catch (err) {
-      // 不兜住的话 busy 会一直是 true，「保存并开始」永久禁用 —— 首次启动直接把人卡死
-      setSaveError(err instanceof Error ? err.message : '保存失败，请重试');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <View style={[styles.setup, { backgroundColor: theme.background }]}>
-      <AnimatedIcon />
-      <ThemedText type="title" style={styles.setupTitle}>
-        AI Assistant
-      </ThemedText>
-      <ThemedText type="small" themeColor="textSecondary" style={styles.centered}>
-        填入 OpenAI API Key 即可开始。Key 只保存在本机安全存储中，不会上传到别处。
-      </ThemedText>
-
-      <TextInput
-        style={[
-          styles.keyInput,
-          {
-            color: theme.text,
-            borderColor: theme.border,
-            backgroundColor: theme.backgroundInput,
-          },
-        ]}
-        value={value}
-        onChangeText={setValue}
-        placeholder="sk-..."
-        placeholderTextColor={theme.textTertiary}
-        secureTextEntry
-        autoCapitalize="none"
-        autoCorrect={false}
-        onSubmitEditing={submit}
-      />
-
-      <Pressable
-        accessibilityRole="button"
-        onPress={submit}
-        disabled={busy || value.trim().length === 0}
-        style={({ pressed }) => [
-          styles.primaryButton,
-          { backgroundColor: theme.primary },
-          (busy || value.trim().length === 0) && styles.disabled,
-          pressed && styles.pressed,
-        ]}>
-        <Text style={[styles.primaryButtonText, { color: theme.onPrimary }]}>保存并开始</Text>
-      </Pressable>
-
-      {error || saveError ? (
-        <Text style={[styles.setupError, { color: theme.danger }]}>{error ?? saveError}</Text>
-      ) : null}
-    </View>
-  );
-}
 
 export default function ChatScreen() {
   const theme = useTheme();
@@ -708,31 +636,7 @@ export default function ChatScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
-  setup: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: Spacing.four,
-    gap: Spacing.three,
-  },
-  setupTitle: { fontSize: 24, fontWeight: '600', textAlign: 'center' },
-  setupError: { fontSize: 13, textAlign: 'center' },
   centered: { textAlign: 'center' },
-  keyInput: {
-    width: '100%',
-    fontSize: 16,
-    padding: Spacing.three,
-    borderRadius: BorderRadius.large,
-    borderWidth: 1,
-  },
-  primaryButton: {
-    width: '100%',
-    alignItems: 'center',
-    paddingHorizontal: Spacing.four,
-    paddingVertical: Spacing.three,
-    borderRadius: BorderRadius.large,
-  },
-  primaryButtonText: { fontSize: 15, fontWeight: '600' },
   header: {
     flexDirection: 'row',
     alignItems: 'center',

@@ -1,7 +1,7 @@
 import { StyleSheet, TextInput, View } from 'react-native';
 
 import { ChipGroup, SegmentedControl, Stepper } from '@/components/settings/settings-controls';
-import { SettingsCard, SettingsSection } from '@/components/settings/settings-section';
+import { FieldHint, SettingsCard, SettingsSection } from '@/components/settings/settings-section';
 import { useDraftField } from '@/components/settings/use-draft-field';
 import { ThemedText } from '@/components/themed-text';
 import {
@@ -14,6 +14,7 @@ import {
   TEMPERATURE_PRESETS,
 } from '@/constants/chat-params';
 import { BorderRadius, Spacing } from '@/constants/theme';
+import { useSavedFlash } from '@/hooks/use-transient-flag';
 import { useTheme } from '@/hooks/use-theme';
 import { useChat } from '@/store/chat-store';
 
@@ -44,6 +45,8 @@ export function GenerationSection() {
     PROMPT_COMMIT_DELAY
   );
 
+  const promptSaved = useSavedFlash(prompt.savedTick);
+
   const activePreset = TEMPERATURE_PRESETS.find(
     (preset) => Math.abs(preset.value - generationSettings.temperature) < 1e-9
   );
@@ -53,9 +56,7 @@ export function GenerationSection() {
       <SettingsCard>
         <View style={styles.fieldHeader}>
           <ThemedText style={styles.fieldLabel}>系统提示词</ThemedText>
-          <ThemedText type="small" themeColor="textTertiary">
-            留空则不注入
-          </ThemedText>
+          <FieldHint hint="留空则不注入" saved={promptSaved} />
         </View>
         <TextInput
           style={[

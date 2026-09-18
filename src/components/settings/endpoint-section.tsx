@@ -1,18 +1,25 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { StyleSheet, TextInput, View } from 'react-native';
 
 import { ChipGroup } from '@/components/settings/settings-controls';
-import { SettingsCard, SettingsNote, SettingsSection } from '@/components/settings/settings-section';
+import {
+  FieldHint,
+  SettingsCard,
+  SettingsNote,
+  SettingsSection,
+} from '@/components/settings/settings-section';
 import { useDraftField } from '@/components/settings/use-draft-field';
 import { ThemedText } from '@/components/themed-text';
 import {
   DEFAULT_TRANSCRIPTION_MODEL,
   findProviderByBaseUrl,
+  isValidBaseUrl,
   normalizeBaseUrl,
   PROVIDER_PRESETS,
   type ProviderPreset,
 } from '@/constants/chat-params';
 import { BorderRadius, Spacing } from '@/constants/theme';
+import { useSavedFlash } from '@/hooks/use-transient-flag';
 import { useTheme } from '@/hooks/use-theme';
 import { useChat } from '@/store/chat-store';
 
@@ -20,11 +27,14 @@ import { useChat } from '@/store/chat-store';
 const COMMIT_DELAY = 500;
 
 /**
- * 「接口」分区：决定请求发到哪家服务商、用哪个模型。
+ * 「接口」与「语音输入」两个分区。
  *
- * 这两项是自建/多服务商场景下最容易配错的地方，也是失败率最高的地方，
- * 所以除了输入框还给了快捷预设，并把**最终会请求的完整地址**直接显示出来，
- * 让用户在发消息之前就能确认自己没写错。
+ * 「接口」决定请求发到哪家服务商、用哪个模型 —— 这是自建/多服务商场景下最容易配错的地方，
+ * 也是失败率最高的地方，所以除了输入框还给了服务商预设，并把**最终会请求的完整地址**
+ * 直接显示出来，让用户在发消息之前就能确认自己没写错。
+ *
+ * 转写模型单独成一个分区：它复用「接口」里的地址与密钥（OpenAI 兼容的
+ * /audio/transcriptions），但属于语音输入能力，混在接口卡片里只会让这一屏更长。
  */
 export function EndpointSection() {
   const theme = useTheme();
@@ -42,12 +52,21 @@ export function EndpointSection() {
     COMMIT_DELAY
   );
 
+  // 失焦后才提示：边打字边报错会一路闪红，而用户很可能只是还没打完
+  const [baseUrlTouched, setBaseUrlTouched] = useState(false);
+  const baseUrlInvalid = baseUrlTouched && !isValidBaseUrl(baseUrl.draft);
+
+  const baseUrlSaved = useSavedFlash(baseUrl.savedTick);
+  const modelSaved = useSavedFlash(modelField.savedTick);
+  const transcriptionSaved = useSavedFlash(transcriptionField.savedTick);
+
   const provider = findProviderByBaseUrl(generationSettings.apiBaseUrl);
 
-  // 认不出当前地址（自定义或中转）时，把所有已知模型都列出来当参考
+  // 只列当前服务商自己的模型。预设变多之后，把全部服务商的模型摊平会堆出几十个胶囊、把页面撑得极长。
+  // 认不出地址（自定义/中转网关）时索性一个都不列 —— 那种场景只能照对方文档手填模型 ID。
   const modelOptions = useMemo(() => {
-    const names = provider ? provider.models : PROVIDER_PRESETS.flatMap((preset) => preset.models);
-    return [...new Set(names)].map((name) => ({ value: name, label: name }));
+    if (!provider) return [];
+    return [...new Set(provider.models)].map((name) => ({ value: name, label: name }));
   }, [provider]);
 
   const providerOptions = PROVIDER_PRESETS.map((preset) => ({
@@ -70,109 +89,120 @@ export function EndpointSection() {
   const endpoint = `${normalizeBaseUrl(generationSettings.apiBaseUrl)}/chat/completions`;
 
   return (
-    <SettingsSection title="接口" caption="决定请求发往哪家服务商，换模型前先确认这里">
-      <SettingsCard>
-        <View style={styles.fieldHeader}>
-          <ThemedText style={styles.fieldLabel}>接口地址</ThemedText>
-          <ThemedText type="small" themeColor="textTertiary">
-            填到 /v1 为止
-          </ThemedText>
-        </View>
+    <>
+      <SettingsSection title="接口" caption="决定请求发往哪家服务商，换模型前先确认这里">
+        <SettingsCard>
+          <View style={styles.fieldHeader}>
+            <ThemedText style={styles.fieldLabel}>接口地址</ThemedText>
+            <FieldHint hint="填到 /v1 为止" saved={baseUrlSaved} />
+          </View>
 
-        <TextInput
-          style={[
-            styles.input,
-            {
-              color: theme.text,
-              backgroundColor: theme.backgroundInput,
-              borderColor: theme.border,
-            },
-          ]}
-          value={baseUrl.draft}
-          onChangeText={(value) => baseUrl.setDraft(value)}
-          placeholder="https://api.openai.com/v1"
-          placeholderTextColor={theme.textTertiary}
-          autoCapitalize="none"
-          autoCorrect={false}
-          keyboardType="url"
-        />
+          <TextInput
+            style={[
+              styles.input,
+              {
+                color: theme.text,
+                backgroundColor: theme.backgroundInput,
+                borderColor: baseUrlInvalid ? theme.danger : theme.border,
+              },
+            ]}
+            value={baseUrl.draft}
+            onChangeText={(value) => baseUrl.setDraft(value)}
+            onBlur={() => setBaseUrlTouched(true)}
+            placeholder="https://api.openai.com/v1"
+            placeholderTextColor={theme.textTertiary}
+            autoCapitalize="none"
+            autoCorrect={false}
+            keyboardType="url"
+          />
 
-        <ChipGroup
-          options={providerOptions}
-          value={provider?.key ?? ''}
-          onChange={(key) => {
-            const preset = PROVIDER_PRESETS.find((item) => item.key === key);
-            if (preset) applyProvider(preset);
-          }}
-        />
+          <ChipGroup
+            options={providerOptions}
+            value={provider?.key ?? ''}
+            onChange={(key) => {
+              const preset = PROVIDER_PRESETS.find((item) => item.key === key);
+              if (preset) applyProvider(preset);
+            }}
+          />
 
-        <SettingsNote>{`实际请求：${endpoint}`}</SettingsNote>
-      </SettingsCard>
+          {baseUrlInvalid ? (
+            <ThemedText type="small" themeColor="danger">
+              地址要以 http:// 或 https:// 开头，例如 https://api.openai.com/v1
+            </ThemedText>
+          ) : (
+            <SettingsNote>{`实际请求：${endpoint}`}</SettingsNote>
+          )}
+        </SettingsCard>
 
-      <SettingsCard>
-        <View style={styles.fieldHeader}>
-          <ThemedText style={styles.fieldLabel}>模型 ID</ThemedText>
-          <ThemedText type="small" themeColor="textTertiary">
-            按服务商的文档填写
-          </ThemedText>
-        </View>
+        <SettingsCard>
+          <View style={styles.fieldHeader}>
+            <ThemedText style={styles.fieldLabel}>模型 ID</ThemedText>
+            <FieldHint hint="按服务商的文档填写" saved={modelSaved} />
+          </View>
 
-        <TextInput
-          style={[
-            styles.input,
-            {
-              color: theme.text,
-              backgroundColor: theme.backgroundInput,
-              borderColor: theme.border,
-            },
-          ]}
-          value={modelField.draft}
-          onChangeText={(value) => modelField.setDraft(value)}
-          placeholder="gpt-4o-mini"
-          placeholderTextColor={theme.textTertiary}
-          autoCapitalize="none"
-          autoCorrect={false}
-        />
+          <TextInput
+            style={[
+              styles.input,
+              {
+                color: theme.text,
+                backgroundColor: theme.backgroundInput,
+                borderColor: theme.border,
+              },
+            ]}
+            value={modelField.draft}
+            onChangeText={(value) => modelField.setDraft(value)}
+            placeholder="gpt-4o-mini"
+            placeholderTextColor={theme.textTertiary}
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
 
-        <ChipGroup
-          options={modelOptions}
-          value={modelField.draft}
-          onChange={(name) => modelField.setDraft(name, true)}
-        />
-      </SettingsCard>
+          {modelOptions.length > 0 ? (
+            <ChipGroup
+              options={modelOptions}
+              value={modelField.draft}
+              onChange={(name) => modelField.setDraft(name, true)}
+            />
+          ) : (
+            <SettingsNote>
+              当前是自定义/中转地址，模型 ID 请按服务商文档手填；点上方服务商胶囊可切回内置预设。
+            </SettingsNote>
+          )}
+        </SettingsCard>
+      </SettingsSection>
 
-      <SettingsCard>
-        <View style={styles.fieldHeader}>
-          <ThemedText style={styles.fieldLabel}>语音转写模型</ThemedText>
-          <ThemedText type="small" themeColor="textTertiary">
-            语音输入用
-          </ThemedText>
-        </View>
+      <SettingsSection title="语音输入" caption="录音转文字，复用「接口」里的地址与密钥">
+        <SettingsCard>
+          <View style={styles.fieldHeader}>
+            <ThemedText style={styles.fieldLabel}>语音转写模型</ThemedText>
+            <FieldHint hint="留空则用默认" saved={transcriptionSaved} />
+          </View>
 
-        <TextInput
-          style={[
-            styles.input,
-            {
-              color: theme.text,
-              backgroundColor: theme.backgroundInput,
-              borderColor: theme.border,
-            },
-          ]}
-          value={transcriptionField.draft}
-          onChangeText={(value) => transcriptionField.setDraft(value)}
-          placeholder={DEFAULT_TRANSCRIPTION_MODEL}
-          placeholderTextColor={theme.textTertiary}
-          autoCapitalize="none"
-          autoCorrect={false}
-        />
+          <TextInput
+            style={[
+              styles.input,
+              {
+                color: theme.text,
+                backgroundColor: theme.backgroundInput,
+                borderColor: theme.border,
+              },
+            ]}
+            value={transcriptionField.draft}
+            onChangeText={(value) => transcriptionField.setDraft(value)}
+            placeholder={DEFAULT_TRANSCRIPTION_MODEL}
+            placeholderTextColor={theme.textTertiary}
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
 
-        <SettingsNote>
-          {`语音输入会把录音发到 ${normalizeBaseUrl(
-            generationSettings.apiBaseUrl
-          )}/audio/transcriptions 识别；留空则用 ${DEFAULT_TRANSCRIPTION_MODEL}。`}
-        </SettingsNote>
-      </SettingsCard>
-    </SettingsSection>
+          <SettingsNote>
+            {`语音输入会把录音发到 ${normalizeBaseUrl(
+              generationSettings.apiBaseUrl
+            )}/audio/transcriptions 识别；留空则用 ${DEFAULT_TRANSCRIPTION_MODEL}。`}
+          </SettingsNote>
+        </SettingsCard>
+      </SettingsSection>
+    </>
   );
 }
 

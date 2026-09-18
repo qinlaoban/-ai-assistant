@@ -2,58 +2,40 @@ import assert from 'node:assert/strict';
 import { test, beforeEach } from 'node:test';
 
 import { DEFAULT_TRANSCRIPTION_MODEL } from '../src/constants/chat-params.ts';
+import { MemoryFileStore, MemorySecretStore } from './_memory-stores.ts';
 
 /**
- * chat-storage 顶部 import 了 react-native / expo-file-system / expo-secure-store，
- * 这些在 Node 里直接加载会崩。tests/_stub-loader.mjs 已经把它们替换成桩
- * （Platform.OS='web'），本文件只需把 window.localStorage 换成内存实现，
- * 即可走「web 分支」测到真实的会话读写逻辑。
+ * chat-storage 已不依赖任何原生模块：它只认 TextFileStore / SecretStore 两个契约，
+ * 平台实现（src/platform/store.ts）是在真正读写时才动态加载的。
+ *
+ * 所以这里注入内存后端就能覆盖完整的会话读写逻辑 —— 不再需要把 Platform.OS
+ * 钉成 'web'，测到的也不再是「web 分支」，而是与平台无关的存储逻辑本身。
  */
 
-class MemStorage {
-  private map = new Map<string, string>();
-
-  get length(): number {
-    return this.map.size;
-  }
-
-  key(index: number): string | null {
-    let i = -1;
-    for (const k of this.map.keys()) {
-      i += 1;
-      if (i === index) return k;
-    }
-    return null;
-  }
-
-  getItem(key: string): string | null {
-    return this.map.has(key) ? (this.map.get(key) as string) : null;
-  }
-
-  setItem(key: string, value: string): void {
-    this.map.set(key, String(value));
-  }
-
-  removeItem(key: string): void {
-    this.map.delete(key);
-  }
-
-  clear(): void {
-    this.map.clear();
-  }
-}
-
-const mem = new MemStorage();
-(globalThis as unknown as { window: { localStorage: MemStorage } }).window = {
-  localStorage: mem,
-};
+const files = new MemoryFileStore();
+const secrets = new MemorySecretStore();
 
 const storage = await import('../src/services/chat-storage.ts');
+storage.setStorageBackend({ files, secrets });
 
+/** 某个会话在存储里的路径（原生端即 `chats/<id>.json`） */
+const chatPath = (id: string): string => `chats/${id}.json`;
+
+/**
+ * 直接塞原始内容，用于构造坏文件 / 旧格式这类 saveChat 造不出来的数据。
+ * 保留 `ai_assistant:chat:<id>` 这套调用方式只是为了不改动下面各处用例，
+ * 底层落到上面注入的内存后端 —— web 端的 key 本来就是这个形状。
+ */
 const WEB_CHAT_PREFIX = 'ai_assistant:chat:';
+const mem = {
+  setItem(key: string, value: string): void {
+    files.seed(chatPath(key.slice(WEB_CHAT_PREFIX.length)), value);
+  },
+};
 
 beforeEach(() => {
-  mem.clear();
+  files.clear();
+  secrets.clear();
 });
 
 // ------------------------------------------------------------ id / 标题

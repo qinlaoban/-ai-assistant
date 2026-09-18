@@ -66,8 +66,17 @@ export interface ProviderPreset {
 }
 
 /**
- * 常见服务商的接口地址与模型 ID。
+ * 常见 OpenAI 兼容服务商的接口地址与模型 ID。
+ * 各家都走同一套 `/chat/completions` + Bearer 鉴权，所以换服务商只是换数据，不需要协议适配层。
  * 设置页里点一下就把地址和模型一起填好，省得用户手抄；填错地址是这类应用最常见的失败原因。
+ *
+ * 两条硬约束（`tests/chat-params.test.ts` 会逐一校验）：
+ * - `baseUrl` 必须与 `normalizeBaseUrl()` 的结果逐字一致。该函数只给「纯域名」补 `/v1`，
+ *   带路径的地址原样保留；写错会让 `findProviderByBaseUrl` 的严格相等匹配失效，
+ *   内置服务商会被误显示成「自定义地址」。
+ * - `models[0]` 是点预设时的默认选中项。
+ *
+ * 模型 ID 会随各家迭代而更名/下线，这里只列常用项；用户在设置页里可以直接改成最新 ID。
  */
 export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
   {
@@ -75,6 +84,66 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     label: 'OpenAI',
     baseUrl: 'https://api.openai.com/v1',
     models: ['gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini', 'gpt-4.1'],
+  },
+  {
+    key: 'deepseek',
+    label: 'DeepSeek',
+    // 官方同时接受 https://api.deepseek.com，与带 /v1 的写法等价；这里取与 OpenAI SDK 对齐的形式
+    baseUrl: 'https://api.deepseek.com/v1',
+    models: ['deepseek-flash', 'deepseek-v4-pro'],
+  },
+  {
+    key: 'qwen',
+    label: '通义千问',
+    // 百炼已推荐迁移到「业务空间专属域名」({WorkspaceId}.cn-beijing.maas.aliyuncs.com)，
+    // 但那个地址因人而异、无法内置；这里用官方声明仍可用的通用域名。
+    // 注意该平台的 API Key 与地域绑定，拿北京的 Key 调其它地域会直接 401。
+    baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    models: ['qwen-plus', 'qwen-max', 'qwen-turbo', 'qwen-long'],
+  },
+  {
+    key: 'kimi',
+    label: 'Kimi',
+    baseUrl: 'https://api.moonshot.cn/v1',
+    models: ['kimi-k3', 'kimi-k2.6', 'kimi-k2.7-code'],
+  },
+  {
+    key: 'zhipu',
+    label: '智谱 GLM',
+    baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+    // glm-4.7-flash 是免费档：放首位当默认，用户点一下预设不会立刻开始计费
+    models: ['glm-4.7-flash', 'glm-4.7', 'glm-4.6', 'glm-5.3'],
+  },
+  {
+    key: 'siliconflow',
+    label: '硅基流动',
+    baseUrl: 'https://api.siliconflow.cn/v1',
+    // 模型 ID 是「组织名/模型名」形式，Pro 档再套一层 Pro/ 前缀
+    models: ['deepseek-ai/DeepSeek-V3.2', 'Qwen/Qwen3.6-27B', 'Pro/zai-org/GLM-5.1'],
+  },
+  {
+    key: 'groq',
+    label: 'Groq',
+    baseUrl: 'https://api.groq.com/openai/v1',
+    models: [
+      'openai/gpt-oss-120b',
+      'openai/gpt-oss-20b',
+      'llama-3.3-70b-versatile',
+      'llama-3.1-8b-instant',
+    ],
+  },
+  {
+    key: 'openrouter',
+    label: 'OpenRouter',
+    // OpenRouter 是聚合网关：同一个地址下就能选到 Claude、Gemini 等非 OpenAI 系模型，
+    // 无需为它们单独适配协议；模型 ID 一律是「厂商/模型」形式。
+    baseUrl: 'https://openrouter.ai/api/v1',
+    models: [
+      'google/gemini-3.8-flash',
+      'anthropic/claude-fable-5.1',
+      'openai/gpt-6-astra',
+      'deepseek/deepseek-v4.1-flash',
+    ],
   },
   {
     key: 'mimo',
@@ -107,6 +176,17 @@ export function normalizeBaseUrl(raw: unknown): string {
   if (/^https?:\/\/[^/]+$/.test(url)) url = `${url}/v1`;
 
   return url;
+}
+
+/**
+ * 拦住最常见的「手滑」：漏了协议头（填成 `api.openai.com`）或协议写错。
+ * 刻意只做这一层校验 —— 各家网关的自定义路径千奇百怪，规则写得越细误伤越多。
+ * 空串算合法：它表示回落到默认地址，不是错误。
+ */
+export function isValidBaseUrl(raw: string): boolean {
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return true;
+  return /^https?:\/\/[^\s/?#]+/i.test(trimmed);
 }
 
 export function formatMaxTokens(value: number): string {

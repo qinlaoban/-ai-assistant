@@ -7,6 +7,7 @@ import {
   findProviderByBaseUrl,
   formatMaxTokens,
   formatTemperature,
+  isValidBaseUrl,
   MAX_TOKENS_OPTIONS,
   normalizeBaseUrl,
   normalizeGenerationSettings,
@@ -54,6 +55,21 @@ test('normalizeBaseUrl：空值或非法类型回退默认地址', () => {
   assert.equal(normalizeBaseUrl(42), DEFAULT_API_BASE_URL);
 });
 
+test('isValidBaseUrl：漏协议头或协议写错要拦下', () => {
+  assert.equal(isValidBaseUrl('api.openai.com/v1'), false);
+  assert.equal(isValidBaseUrl('ftp://api.openai.com/v1'), false);
+  assert.equal(isValidBaseUrl('https://'), false);
+});
+
+test('isValidBaseUrl：常见写法都放行（含本地部署与自定义子路径）', () => {
+  assert.equal(isValidBaseUrl('https://api.openai.com/v1'), true);
+  assert.equal(isValidBaseUrl('http://192.168.1.9:8000/v1'), true);
+  assert.equal(isValidBaseUrl('https://gateway.example.com/openai/v1'), true);
+  // 空值表示回落到默认地址，不是错误
+  assert.equal(isValidBaseUrl(''), true);
+  assert.equal(isValidBaseUrl('   '), true);
+});
+
 // ------------------------------------------------------------ 服务商预设
 
 test('内置预设：MiMo 的地址与模型 ID 与官方文档一致', () => {
@@ -75,8 +91,51 @@ test('findProviderByBaseUrl：能容忍用户少填 /v1 或末尾多斜杠', () 
   assert.equal(findProviderByBaseUrl('https://api.openai.com/v1/')?.key, 'openai');
 });
 
-test('findProviderByBaseUrl：自定义或中转地址返回 null（此时模型列表回落为全集）', () => {
+test('findProviderByBaseUrl：自定义或中转地址返回 null（此时设置页提示手填模型 ID）', () => {
   assert.equal(findProviderByBaseUrl('https://my-gateway.example.com/v1'), null);
+});
+
+test('内置预设：key 与接口地址都唯一，且地址已是归一化形态', () => {
+  const keys = PROVIDER_PRESETS.map((preset) => preset.key);
+  assert.equal(new Set(keys).size, keys.length, '存在重复的 key');
+
+  const urls = PROVIDER_PRESETS.map((preset) => preset.baseUrl);
+  assert.equal(new Set(urls).size, urls.length, '存在重复的 baseUrl');
+
+  // 只要有一个地址没归一化，findProviderByBaseUrl 就认不出它，
+  // 设置页会把内置服务商显示成「自定义地址」，预设等于白配
+  for (const preset of PROVIDER_PRESETS) {
+    assert.equal(normalizeBaseUrl(preset.baseUrl), preset.baseUrl, `${preset.key} 的地址未归一化`);
+  }
+});
+
+test('内置预设：每家都有模型，且能按地址反查回自己', () => {
+  for (const preset of PROVIDER_PRESETS) {
+    assert.ok(preset.models.length > 0, `${preset.key} 没有可选的模型`);
+    for (const model of preset.models) {
+      assert.equal(model, model.trim(), `${preset.key} 的模型 ID 含首尾空白`);
+      assert.ok(model.length > 0, `${preset.key} 存在空模型 ID`);
+    }
+    assert.equal(findProviderByBaseUrl(preset.baseUrl)?.key, preset.key);
+  }
+});
+
+test('内置预设：覆盖常见 OpenAI 兼容服务商', () => {
+  const keys = new Set(PROVIDER_PRESETS.map((preset) => preset.key));
+  const expected = [
+    'openai',
+    'deepseek',
+    'qwen',
+    'kimi',
+    'zhipu',
+    'siliconflow',
+    'groq',
+    'openrouter',
+    'mimo',
+  ];
+  for (const key of expected) {
+    assert.ok(keys.has(key), `缺少 ${key} 预设`);
+  }
 });
 
 // ------------------------------------------------------------ 设置收敛

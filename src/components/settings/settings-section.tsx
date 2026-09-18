@@ -65,6 +65,24 @@ export function SettingsNote({ children }: { children: ReactNode }) {
   );
 }
 
+/**
+ * 字段标题右侧的注解位：平时显示填法提示，刚落盘时短暂让位给「已保存」。
+ *
+ * 设置页没有提交按钮，用户改完无从确认是否存上；这里复用本来就要显示提示的位置做反馈，
+ * 不额外占版面，也不会像 Toast 那样打断操作。
+ */
+export function FieldHint({ hint, saved }: { hint: string; saved: boolean }) {
+  return saved ? (
+    <ThemedText type="small" themeColor="link">
+      已保存
+    </ThemedText>
+  ) : (
+    <ThemedText type="small" themeColor="textTertiary">
+      {hint}
+    </ThemedText>
+  );
+}
+
 const styles = StyleSheet.create({
   section: { gap: Spacing.one },
   title: { fontSize: 13, fontWeight: '700', letterSpacing: 0.4 },

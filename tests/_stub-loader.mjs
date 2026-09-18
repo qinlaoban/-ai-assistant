@@ -1,16 +1,19 @@
 /**
- * 测试用 ESM 加载器：把 chat-storage 顶部依赖的三个原生模块替换成桩，
- * 这样在 Node 里 import chat-storage 时不会去加载 react-native /
- * expo-file-system / expo-secure-store（它们在 Node 下无法运行，
- * 且 expo-file-system 的子路径会触发 node_modules 的 TS 类型剥离限制）。
+ * 测试用 ESM 加载器：把仍在 services 里直接依赖原生模块的文件替换成桩，
+ * 这样在 Node 里 import 它们时不会去加载 react-native / expo-*（它们在 Node 下
+ * 无法运行，且 expo-file-system 的子路径会触发 node_modules 的 TS 类型剥离限制）。
  *
- * 桩把 Platform.OS 设为 'web'，从而让 chat-storage 走 web 分支（localStorage），
- * 配合 tests/chat-storage.test.ts 里注入的内存 localStorage 即可测到真实读写逻辑。
+ * 注意：**存储（chat-storage）已经不走这里了** —— 它只依赖
+ * src/services/key-value-store.ts 里的契约，测试通过 setStorageBackend() 注入
+ * tests/_memory-stores.ts 的内存实现，所以那部分逻辑不再需要任何桩，
+ * 平台分支也真正被「选择」而不是被钉死。
+ *
+ * 仍留在下面的，是附件 / 导出 / 转写 / 朗读这几个必须直接调原生能力的模块。
+ * 它们的桩把 Platform.OS 设为 'web'，因此这些模块的原生分支依然不被覆盖。
  */
 const STUBS = {
   'react-native': `export const Platform = { OS: 'web' };`,
   'expo-file-system/legacy': `export {};`,
-  'expo-secure-store': `export {};`,
   // 导出模块（chat-export）在 Node 下也会被 import：只需桩住签名，纯函数部分才可测
   'expo-clipboard': `export async function setStringAsync() {}`,
   'expo-sharing': `export async function isAvailableAsync() { return false; }\nexport async function shareAsync() {}`,
@@ -25,13 +28,8 @@ export async function resolve(specifier, context, next) {
   if (Object.prototype.hasOwnProperty.call(STUBS, specifier)) {
     return { url: `stub:${specifier}`, shortCircuit: true };
   }
-  // chat-storage 用的是 Metro 风格的省略扩展名相对导入（如 '../constants/chat-params'），
-  // Node 的 ESM 解析要求写全扩展名。这里给相对路径补上 .ts，使其能在 Node 下加载。
-  if (specifier.startsWith('.') && !/\.(ts|tsx|js|mjs|cjs|json)$/.test(specifier)) {
-    const parent = context.parentURL ?? import.meta.url;
-    const url = new URL(`${specifier}.ts`, parent).href;
-    return { url, shortCircuit: true };
-  }
+  // 这里刻意不再「给无扩展名相对导入补 .ts」：services / constants 已统一写全扩展名，
+  // 与其在加载器里悄悄兜底，不如让遗漏在测试里直接报错（见 AGENTS.md「可测试层的写法」）。
   return next(specifier, context);
 }
 

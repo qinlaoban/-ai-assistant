@@ -8,13 +8,17 @@ import { useCallback, useEffect, useRef, useState } from 'react';
  * 「停笔一段时间后提交 + 卸载时把未落盘的草稿补交」。
  *
  * `setDraft(value, true)` 用于需要立刻生效的场景（例如点快捷选项）。
+ *
+ * 返回的 `savedTick` 每完成一次提交就自增，供 `useSavedFlash` 那类「已保存」轻反馈当信号源。
  */
 export function useDraftField(
   saved: string,
   commit: (value: string) => void,
   delay: number
-): { draft: string; setDraft: (value: string, immediate?: boolean) => void } {
+): { draft: string; setDraft: (value: string, immediate?: boolean) => void; savedTick: number } {
   const [draft, setDraftState] = useState(saved);
+  /** 只用来驱动「已保存」提示的自增计数；0 表示本次进入页面后还没提交过 */
+  const [savedTick, setSavedTick] = useState(0);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const draftRef = useRef(saved);
 
@@ -52,16 +56,18 @@ export function useDraftField(
 
       if (immediate) {
         commit(value);
+        setSavedTick((tick) => tick + 1);
         return;
       }
 
       timerRef.current = setTimeout(() => {
         timerRef.current = null;
         commit(value);
+        setSavedTick((tick) => tick + 1);
       }, delay);
     },
     [commit, delay]
   );
 
-  return { draft, setDraft };
+  return { draft, setDraft, savedTick };
 }
