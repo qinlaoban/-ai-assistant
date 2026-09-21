@@ -43,8 +43,12 @@ export interface AssistantSeed {
   createdAt?: number;
   /** 已生成过的历史版本（按先后排列，**含被替换的旧内容**） */
   versions?: string[];
+  /** 与 versions 一一对应的历史推理过程（重新生成时用于版本切换后仍显示正确的思考） */
+  reasonings?: string[];
   /** 续写前缀：extend 模式下以该正文为基础累加增量 */
   appendBase?: string;
+  /** 续写前缀对应的推理过程（extend 模式） */
+  appendReasoningBase?: string;
 }
 
 /**
@@ -95,8 +99,13 @@ export function switchMessageVersion(message: ChatMessage, delta: -1 | 1): ChatM
   const next = clampIndex(view.active + delta, view.total);
   if (next === view.active) return message;
   const versions = message.versions as string[];
-  // content 与 versions[activeVersion] 必须同步，content 是显示/请求/存储的唯一权威值
-  return { ...message, activeVersion: next, content: versions[next] };
+  // content 与 versions[activeVersion] 必须同步，content 是显示/请求/存储的唯一权威值。
+  // reasoning 同理跟随 reasoningVersions 一起切换，否则切到旧版本会显示新版本的思考过程
+  const nextReasoning = message.reasoningVersions?.[next] ?? message.reasoning ?? '';
+  const result: ChatMessage = { ...message, activeVersion: next, content: versions[next] };
+  if (nextReasoning.length > 0) result.reasoning = nextReasoning;
+  else delete result.reasoning;
+  return result;
 }
 
 /** 重新生成前，取这条助手消息的已有版本（含它自己）；没有版本列表时把自己当作唯一版本 */
@@ -106,23 +115,47 @@ export function seedVersionsFor(message: ChatMessage): string[] {
 }
 
 /**
+ * 重新生成前，取与 seedVersionsFor 对齐的历史推理列表。
+ * 旧消息可能没有 reasoningVersions：单版本时用它自己的 reasoning 兜底，多版本时补空串。
+ */
+export function seedReasoningsFor(message: ChatMessage): string[] {
+  const versions = seedVersionsFor(message);
+  const base = message.reasoningVersions;
+  if (base && base.length > 0) return versions.map((_, index) => base[index] ?? '');
+  if (versions.length === 1) return [message.reasoning ?? ''];
+  return versions.map(() => '');
+}
+
+/**
  * 收尾：把流式结果并入版本列表（纯函数）。
  *
  * - extend：结果写回**当前版本**，版本数不变（续写不产生新版本）
  * - 带 versions 的 append：新内容追加成**新版本**并指向它（重新生成）
  * - 其它（全新回复）：不引入版本字段，保持单版本
+ *
+ * reasoning 与 content 同步归档，保证「切到哪个版本就显示哪个版本的思考过程」。
  */
 export function finalizeAssistantMessage(message: ChatMessage, seed?: AssistantSeed): ChatMessage {
   if (seed?.mode === 'extend') {
     const versions = (seed.versions ?? [message.content]).slice();
     const active = clampIndex(message.activeVersion ?? versions.length - 1, versions.length);
-    if (versions[active] === message.content) return message;
+    const reasonings = versions.map(
+      (_, index) => seed.reasonings?.[index] ?? (index === active ? (message.reasoning ?? '') : '')
+    );
+    const nextReasoning = message.reasoning ?? '';
+    const versionChanged = versions[active] !== message.content;
+    const reasoningChanged = (reasonings[active] ?? '') !== nextReasoning;
+    if (!versionChanged && !reasoningChanged) return message;
     versions[active] = message.content;
-    return { ...message, versions, activeVersion: active };
+    reasonings[active] = nextReasoning;
+    return { ...message, versions, activeVersion: active, reasoningVersions: reasonings };
   }
   if (seed?.versions && seed.versions.length > 0) {
     const versions = [...seed.versions, message.content];
-    return { ...message, versions, activeVersion: versions.length - 1 };
+    // 缺 reasonings 时按 versions 长度补空串，避免两个数组错位
+    const baseReasonings = seed.reasonings ?? seed.versions.map(() => '');
+    const reasonings = [...baseReasonings, message.reasoning ?? ''];
+    return { ...message, versions, activeVersion: versions.length - 1, reasoningVersions: reasonings };
   }
   return message;
 }
@@ -141,18 +174,19 @@ export function rollbackAssistantSeed(
   if (seed?.mode === 'extend') return history;
   if (!seed?.id) return history;
   const versions = seed.versions && seed.versions.length > 0 ? seed.versions : [''];
+  const reasonings = versions.map((_, index) => seed.reasonings?.[index] ?? '');
   const lastIndex = versions.length - 1;
-  return [
-    ...history,
-    {
-      role: 'assistant',
-      content: versions[lastIndex],
-      id: seed.id,
-      createdAt: seed.createdAt,
-      versions,
-      activeVersion: lastIndex,
-    },
-  ];
+  const restored: ChatMessage = {
+    role: 'assistant',
+    content: versions[lastIndex],
+    id: seed.id,
+    createdAt: seed.createdAt,
+    versions,
+    activeVersion: lastIndex,
+  };
+  if (reasonings[lastIndex].length > 0) restored.reasoning = reasonings[lastIndex];
+  if (reasonings.some((item) => item.length > 0)) restored.reasoningVersions = reasonings;
+  return [...history, restored];
 }
 
 // ---------------------------------------------------------------- 日期分隔

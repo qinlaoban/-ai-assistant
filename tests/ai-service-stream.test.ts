@@ -459,3 +459,73 @@ test('已 abort 的 signal 归一成 AbortError（name 为 AbortError）', async
     (err: unknown) => err instanceof Error && err.name === 'AbortError'
   );
 });
+
+// ------------------------------------------------------------ reasoning 解析
+
+test('流式：reasoning_content 走独立回调，且不混入正文', async () => {
+  installFetch(() =>
+    sseResponse([
+      'data: {"choices":[{"delta":{"reasoning_content":"先想"}}]}\n\n',
+      'data: {"choices":[{"delta":{"reasoning_content":"一下"}}]}\n\n',
+      'data: {"choices":[{"delta":{"content":"答案"}}]}\n\n',
+      'data: [DONE]\n\n',
+    ])
+  );
+  const thoughts: string[] = [];
+  const deltas: string[] = [];
+  const text = await sendMessageStream(SAMPLE, { model: DEFAULT_MODEL, apiKey: 'k' }, {
+    onDelta: (d) => deltas.push(d),
+    onReasoning: (d) => thoughts.push(d),
+  });
+  assert.equal(thoughts.join(''), '先想一下');
+  assert.equal(deltas.join(''), '答案');
+  assert.equal(text, '答案', '返回值仍是正文，不含推理');
+});
+
+test('流式：字段名为 reasoning（无 _content）时同样被识别', async () => {
+  installFetch(() =>
+    sseResponse([
+      'data: {"choices":[{"delta":{"reasoning":"思考"}}]}\n\n',
+      'data: {"choices":[{"delta":{"content":"答"}}]}\n\n',
+      'data: [DONE]\n\n',
+    ])
+  );
+  const thoughts: string[] = [];
+  const text = await sendMessageStream(SAMPLE, { model: DEFAULT_MODEL, apiKey: 'k' }, {
+    onDelta: () => {},
+    onReasoning: (d) => thoughts.push(d),
+  });
+  assert.equal(thoughts.join(''), '思考');
+  assert.equal(text, '答');
+});
+
+test('流式：没有 onReasoning 回调时，推理不产生任何副作用', async () => {
+  installFetch(() =>
+    sseResponse([
+      'data: {"choices":[{"delta":{"reasoning_content":"想"}}]}\n\n',
+      'data: {"choices":[{"delta":{"content":"答"}}]}\n\n',
+      'data: [DONE]\n\n',
+    ])
+  );
+  const text = await sendMessageStream(SAMPLE, { model: DEFAULT_MODEL, apiKey: 'k' }, {
+    onDelta: () => {},
+  });
+  assert.equal(text, '答');
+});
+
+test('请求体：本地 reasoning / reasoningVersions 字段不下发', async () => {
+  installFetch(() => sseResponse(['data: [DONE]\n\n']));
+  await sendMessageStream(
+    [
+      {
+        role: 'assistant',
+        content: '答案',
+        reasoning: '内心戏',
+        reasoningVersions: ['内心戏'],
+      },
+    ],
+    { model: DEFAULT_MODEL, apiKey: 'k' },
+    { onDelta: () => {} }
+  );
+  assert.deepEqual(fetchCalls[0].body.messages, [{ role: 'assistant', content: '答案' }]);
+});

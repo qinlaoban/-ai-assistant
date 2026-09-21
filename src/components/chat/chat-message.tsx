@@ -1,10 +1,15 @@
 import { Image } from 'expo-image';
-import { memo } from 'react';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { Markdown } from '@/components/chat/markdown';
 import { TypingIndicator } from '@/components/chat/typing-indicator';
-import { ChevronLeftIcon, ChevronRightIcon, PaperclipIcon } from '@/components/icons';
+import {
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  PaperclipIcon,
+  SparkleIcon,
+} from '@/components/icons';
 import { BorderRadius, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import type { MessageAttachment } from '@/services/ai-service';
@@ -21,6 +26,8 @@ interface ChatMessageProps {
   quote?: string;
   /** 该条消息的附件；只有用户消息会带 */
   attachments?: MessageAttachment[];
+  /** 思考型模型的推理过程；非空时在正文上方渲染可折叠的思考区 */
+  reasoning?: string;
   /**
    * 版本指示（用两个数字而不是对象：memo 按下标/总数比较值，
    * 传对象会让每次 render 都判定为新 props，流式期间整列表跟着重渲染）
@@ -48,6 +55,62 @@ function formatClock(timestamp: number): string {
   return `${hours}:${minutes}`;
 }
 
+/**
+ * 思考过程折叠区。
+ *
+ * 思考期间（正文还没开始输出）默认展开，让用户看到推理正在进行；正文一来就自动收起，
+ * 避免长推理把答案挤出屏幕。收起后仍可手动展开回看。
+ * 独立成 memo 组件：流式期间只有正在改写的那条消息会重渲染。
+ */
+const ReasoningBlock = memo(function ReasoningBlock({
+  text,
+  streaming,
+}: {
+  text: string;
+  streaming: boolean;
+}) {
+  const theme = useTheme();
+  const [expanded, setExpanded] = useState(streaming);
+
+  // 从「思考中」转为结束的那一刻自动收起一次；之后展开/折叠交给用户
+  const wasStreamingRef = useRef(streaming);
+  useEffect(() => {
+    if (wasStreamingRef.current && !streaming) setExpanded(false);
+    wasStreamingRef.current = streaming;
+  }, [streaming]);
+
+  const toggle = useCallback(() => setExpanded((prev) => !prev), []);
+
+  return (
+    <View
+      style={[
+        styles.reasoning,
+        { backgroundColor: theme.codeBackground, borderColor: theme.border },
+      ]}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityState={{ expanded }}
+        accessibilityLabel={expanded ? '收起思考过程' : '展开思考过程'}
+        onPress={toggle}
+        hitSlop={6}
+        style={({ pressed }) => [styles.reasoningHeader, pressed && styles.pressed]}>
+        <SparkleIcon size={14} color={theme.textTertiary} />
+        <Text style={[styles.reasoningTitle, { color: theme.textSecondary }]}>
+          {streaming ? '思考中…' : '思考过程'}
+        </Text>
+        <View style={{ transform: [{ rotate: expanded ? '90deg' : '0deg' }] }}>
+          <ChevronRightIcon size={14} color={theme.textTertiary} />
+        </View>
+      </Pressable>
+      {expanded ? (
+        <Text selectable style={[styles.reasoningText, { color: theme.textSecondary }]}>
+          {text}
+        </Text>
+      ) : null}
+    </View>
+  );
+});
+
 export const ChatMessage = memo(function ChatMessage({
   role,
   content,
@@ -55,6 +118,7 @@ export const ChatMessage = memo(function ChatMessage({
   createdAt,
   quote,
   attachments,
+  reasoning,
   versionActive = 0,
   versionTotal,
   onVersionChange,
@@ -143,7 +207,11 @@ export const ChatMessage = memo(function ChatMessage({
           </>
         ) : (
           <>
-            {isStreaming && content.length === 0 ? <TypingIndicator /> : null}
+            {reasoning && reasoning.length > 0 ? (
+              // 正文还没开始时才算「思考中」，正文一来就自动收起思考区
+              <ReasoningBlock text={reasoning} streaming={isStreaming && content.length === 0} />
+            ) : null}
+            {isStreaming && content.length === 0 && !reasoning ? <TypingIndicator /> : null}
             <Markdown text={content} color={theme.bubbleAssistantText} />
             {isStreaming && content.length > 0 ? (
               <View style={[styles.caret, { backgroundColor: theme.textTertiary }]} />
@@ -252,6 +320,18 @@ const styles = StyleSheet.create({
   },
   versionArrow: { paddingHorizontal: Spacing.one, paddingVertical: 2 },
   versionText: { fontSize: 12, fontWeight: '600', minWidth: 30, textAlign: 'center' },
+  // 思考过程折叠区：比正文更弱化的浅底块，表头可点开/收起
+  reasoning: {
+    borderRadius: BorderRadius.small,
+    borderWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: Spacing.two,
+    paddingVertical: Spacing.one,
+    marginBottom: Spacing.two,
+    gap: Spacing.one,
+  },
+  reasoningHeader: { flexDirection: 'row', alignItems: 'center', gap: Spacing.one },
+  reasoningTitle: { fontSize: 12, fontWeight: '600', flex: 1 },
+  reasoningText: { fontSize: 13, lineHeight: 20 },
   time: { fontSize: 11, marginTop: 2, marginHorizontal: Spacing.one },
   // 长按期间给一点压感反馈；用透明度而不是缩放，避免文字在按住时糊掉或位移
   pressed: { opacity: 0.85 },

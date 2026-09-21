@@ -74,6 +74,7 @@ const MessageRow = memo(function MessageRow({
   createdAt,
   quote,
   attachments,
+  reasoning,
   versionActive,
   versionTotal,
   highlight,
@@ -88,6 +89,7 @@ const MessageRow = memo(function MessageRow({
   createdAt?: number;
   quote?: string;
   attachments?: MessageAttachment[];
+  reasoning?: string;
   versionActive?: number;
   versionTotal?: number;
   highlight: 'none' | 'match' | 'active';
@@ -108,6 +110,7 @@ const MessageRow = memo(function MessageRow({
       createdAt={createdAt}
       quote={quote}
       attachments={attachments}
+      reasoning={reasoning}
       versionActive={versionActive}
       versionTotal={versionTotal}
       highlight={highlight}
@@ -295,6 +298,7 @@ export function MessageList({
           createdAt={message.createdAt}
           quote={message.quote}
           attachments={message.attachments}
+          reasoning={message.reasoning}
           versionActive={view?.active}
           versionTotal={view?.total}
           highlight={highlight}

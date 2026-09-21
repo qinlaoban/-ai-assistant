@@ -43,6 +43,13 @@ export interface ChatMessage {
   versions?: string[];
   /** 当前展示版本在 versions 中的下标；content 恒等于 versions[activeVersion] */
   activeVersion?: number;
+  /**
+   * 思考型模型（DeepSeek / MiMo 等）的推理过程。
+   * 与 content 一样属于本地展示字段，不会随请求下发；只有助手消息可能有。
+   */
+  reasoning?: string;
+  /** 各版本对应的推理过程，与 versions 一一对应；reasoning 恒等于 reasoningVersions[activeVersion] */
+  reasoningVersions?: string[];
   /** 用户消息引用的上下文；仅用于气泡渲染，请求时会被折进正文 */
   quote?: string;
   /** 该条用户消息携带的附件 */
@@ -96,6 +103,11 @@ export interface AIConfig {
 export interface AICallbacks {
   /** 收到的是「增量」而非累积文本，调用方自行拼接 */
   onDelta: (delta: string) => void;
+  /**
+   * 思考型模型的推理增量（reasoning_content / reasoning）。
+   * 与 onDelta 一样是增量而非累积；不支持推理的模型不会被调用。
+   */
+  onReasoning?: (delta: string) => void;
   /** 服务端在流末尾回传的用量；部分服务端不回传，届时不会被调用 */
   onUsage?: (usage: Usage) => void;
 }
@@ -142,16 +154,18 @@ function toUsage(raw: unknown): Usage | null {
 
 interface ParsedSseEvent {
   delta: string | null;
+  reasoning: string | null;
   usage: Usage | null;
 }
 
 /**
- * 从单个 SSE 事件块里抽出增量文本与用量。
+ * 从单个 SSE 事件块里抽出增量文本、推理增量与用量。
  * 一个事件块可能有多行 `data:`，OpenAI 正常只发一行，但两者都要能处理。
- * 末尾那个 usage 块通常 `choices` 为空数组，所以两条通道必须独立判断、互不早退。
+ * 末尾那个 usage 块通常 `choices` 为空数组，所以三条通道必须独立判断、互不早退。
  */
 function parseSseEvent(event: string): ParsedSseEvent {
   let delta = '';
+  let reasoning = '';
   let usage: Usage | null = null;
 
   for (const line of event.split('\n')) {
@@ -161,8 +175,12 @@ function parseSseEvent(event: string): ParsedSseEvent {
     if (payload.length === 0 || payload === '[DONE]') continue;
     try {
       const parsed = JSON.parse(payload);
-      const content = parsed?.choices?.[0]?.delta?.content;
+      const choiceDelta = parsed?.choices?.[0]?.delta;
+      const content = choiceDelta?.content;
       if (typeof content === 'string') delta += content;
+      // 字段名各家不一：DeepSeek / MiMo 用 reasoning_content，部分网关用 reasoning
+      const thought = choiceDelta?.reasoning_content ?? choiceDelta?.reasoning;
+      if (typeof thought === 'string') reasoning += thought;
       const parsedUsage = toUsage(parsed?.usage);
       if (parsedUsage) usage = parsedUsage;
     } catch {
@@ -170,7 +188,11 @@ function parseSseEvent(event: string): ParsedSseEvent {
     }
   }
 
-  return { delta: delta.length > 0 ? delta : null, usage };
+  return {
+    delta: delta.length > 0 ? delta : null,
+    reasoning: reasoning.length > 0 ? reasoning : null,
+    usage,
+  };
 }
 
 /** 把引用折成 Markdown 引用块：模型必须看到被引用的上下文 */
@@ -380,9 +402,11 @@ async function streamCompletion(
 
   const consume = (events: string[]) => {
     for (const event of events) {
-      const { delta, usage } = parseSseEvent(event);
+      const { delta, reasoning, usage } = parseSseEvent(event);
       // usage 可能单独成块，也可能整场都不出现（服务端差异），两种都要能忍
       if (usage) callbacks.onUsage?.(usage);
+      // 推理与正文是两条独立通道：思考型模型可能先只发推理，正文随后才来
+      if (reasoning !== null) callbacks.onReasoning?.(reasoning);
       if (delta === null) continue;
       fullText += delta;
       callbacks.onDelta(delta);

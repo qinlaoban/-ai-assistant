@@ -32,6 +32,7 @@ import {
   isSameUsage,
   makeQuote,
   rollbackAssistantSeed,
+  seedReasoningsFor,
   seedVersionsFor,
   shouldPersist,
   switchMessageVersion,
@@ -161,6 +162,10 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   const pendingRef = useRef('');
   /** 流式内容的固定前缀：续写时是被续写的原文，其余情况为空串 */
   const streamBaseRef = useRef('');
+  /** 本轮流式的推理增量（思考型模型）；与 pendingRef 同款节流镜像 */
+  const reasoningPendingRef = useRef('');
+  /** 推理过程的固定前缀：续写时是被续写那条的已有推理，其余情况为空串 */
+  const reasoningBaseRef = useRef('');
   const abortRef = useRef<AbortController | null>(null);
   const streamingRef = useRef(false);
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -234,9 +239,15 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     if (last?.role !== 'assistant') return;
     // 必须保留原消息的 id：id 一变列表 key 就变，气泡会被卸载重建，表现为闪烁与滚动跳位
     // 续写时前缀拼在增量之前，普通发送时前缀为空串，行为与改造前一致
+    const reasoning = reasoningBaseRef.current + reasoningPendingRef.current;
     commitMessages([
       ...base.slice(0, -1),
-      { ...last, content: streamBaseRef.current + pendingRef.current },
+      {
+        ...last,
+        content: streamBaseRef.current + pendingRef.current,
+        // 推理为空时不落字段，保持旧消息与旧测试的形态
+        ...(reasoning.length > 0 ? { reasoning } : null),
+      },
     ]);
   }, [commitMessages]);
 
@@ -309,6 +320,8 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       }
       pendingRef.current = '';
       streamBaseRef.current = '';
+      reasoningPendingRef.current = '';
+      reasoningBaseRef.current = '';
       // 引用、朗读与图片的 base64 缓存都属于「当前这条会话」，切走后不该残留
       setQuotedText(null);
       speakingIndexRef.current = null;
@@ -388,7 +401,9 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       // 流式结果以它的已有正文为前缀累加；其余情况补一条空占位，流式原地替换。
       const extend = seed?.mode === 'extend';
       streamBaseRef.current = extend ? (seed?.appendBase ?? '') : '';
+      reasoningBaseRef.current = extend ? (seed?.appendReasoningBase ?? '') : '';
       pendingRef.current = '';
+      reasoningPendingRef.current = '';
       // 每轮请求重置用量去重基准，避免跨轮误判
       lastUsageRef.current = null;
       commitMessages(
@@ -427,6 +442,10 @@ export function ChatProvider({ children }: { children: ReactNode }) {
           {
             onDelta: (delta) => {
               pendingRef.current += delta;
+              scheduleFlush();
+            },
+            onReasoning: (delta) => {
+              reasoningPendingRef.current += delta;
               scheduleFlush();
             },
             onUsage: (next) => {
@@ -468,6 +487,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
           setIsStreaming(false);
           abortRef.current = null;
           streamBaseRef.current = '';
+          reasoningBaseRef.current = '';
           const updatedAt = Date.now();
           await persist(updatedAt);
           // 就地更新摘要即可：不必为了刷新列表而重读全部会话文件
@@ -569,6 +589,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         id: target.id,
         createdAt: target.createdAt,
         versions: seedVersionsFor(target),
+        reasonings: seedReasoningsFor(target),
       });
     },
     [resendFrom]
@@ -585,7 +606,9 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       id: last.id,
       createdAt: last.createdAt,
       versions: seedVersionsFor(last),
+      reasonings: seedReasoningsFor(last),
       appendBase: last.content,
+      appendReasoningBase: last.reasoning ?? '',
     });
   }, [runCompletion]);
 
